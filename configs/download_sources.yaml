@@ -1,0 +1,63 @@
+schema_version: fastwam-download-sources-v1
+
+# group_dir preserves the raw-data layout expected by the preprocess adapters.
+# "author" sources are expanded to every dataset repository owned by that HF org.
+datasets:
+  oxe:
+    display_name: OXE / Open X-Embodiment
+    group_dir: OXE_OpenX_Embodiment
+    source:
+      type: fixed
+      repositories:
+        - repo_id: jxu124/OpenX-Embodiment
+          local_name: jxu124_OpenX-Embodiment
+
+  oxe_auge:
+    display_name: OXE-AugE
+    group_dir: OXE_AugE
+    source:
+      type: author
+      author: oxe-auge
+
+  agibot_beta:
+    display_name: AgiBot-Beta
+    group_dir: AgiBot_Beta
+    source:
+      type: fixed
+      repositories:
+        - repo_id: agibot-world/AgiBotWorld-Beta
+          local_name: AgiBotWorld-Beta
+
+  robocoin:
+    display_name: RoboCOIN
+    group_dir: RoboCOIN
+    source:
+      type: author
+      author: RoboCOIN
+
+  robomind:
+    display_name: RoboMIND
+    group_dir: RoboMIND
+    source:
+      type: fixed
+      repositories:
+        - repo_id: x-humanoid-robomind/RoboMIND
+          local_name: RoboMIND
+
+  galaxea:
+    display_name: Galaxea
+    group_dir: Galaxea
+    source:
+      type: fixed
+      repositories:
+        - repo_id: OpenGalaxea/Galaxea-Open-World-Dataset
+          local_name: Galaxea-Open-World-Dataset
+
+  interndata_a1:
+    display_name: InternData-A1
+    group_dir: InternData_A1
+    source:
+      type: fixed
+      repositories:
+        - repo_id: InternRobotics/InternData-A1
+          local_name: InternData-A1

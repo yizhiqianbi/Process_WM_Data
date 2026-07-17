@@ -1,0 +1,32 @@
+schema_version: fastwam-preprocess-v1
+# Dataset roots are relative to FASTWAM_DATA_ROOT. The executable registry uses
+# the same layout and defaults FASTWAM_DATA_ROOT to this code directory's parent.
+defaults:
+  num_frames: 81
+  target_fps: 20
+  action_horizon: 80
+  action_video_freq_ratio: 4
+  video_points: 21
+  window_stride: 40
+datasets:
+  oxe:
+    root: OXE_OpenX_Embodiment/jxu124_OpenX-Embodiment
+    source_format: tar_pickled_rlds_episode
+  oxe_auge:
+    root: OXE_AugE
+    source_format: lerobot_and_augmented_variants
+  agibot_beta:
+    root: AgiBot_Beta/AgiBotWorld-Beta
+    source_format: observation_tar
+  robocoin:
+    root: RoboCOIN
+    source_format: lerobot_v2_1
+  robomind:
+    root: RoboMIND/RoboMIND
+    source_format: split_tar_gz_then_hdf5
+  galaxea:
+    root: Galaxea/Galaxea-Open-World-Dataset
+    source_format: tar_gz_containing_lerobot_v2_1
+  interndata_a1:
+    root: InternData_A1/InternData-A1
+    source_format: assets_or_lerobot_trajectories

@@ -1,0 +1,26 @@
+schema_version: canonical-episode-v1
+dimension: 80
+camera_slots:
+  - global_primary
+  - global_secondary
+  - left_wrist
+  - right_wrist
+  - auxiliary
+semantic_blocks:
+  left_ee: [0, 6]
+  left_gripper: [6, 7]
+  right_ee: [7, 13]
+  right_gripper: [13, 14]
+  left_joint: [14, 21]
+  right_joint: [21, 28]
+  left_hand: [28, 40]
+  right_hand: [40, 52]
+  mobile_base: [52, 58]
+  torso_head: [58, 64]
+  reserved: [64, 80]
+rules:
+  - Unmapped values are zero with valid mask false.
+  - Reserved slots are always invalid.
+  - Euler angles and quaternions are not copied into rotation-vector slots.
+  - Frame-sensitive EE fields remain inactive until embodiment review.
+  - Every materialized row retains its native source reference.

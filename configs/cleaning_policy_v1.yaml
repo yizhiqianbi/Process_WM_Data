@@ -1,0 +1,26 @@
+schema_version: fastwam-cleaning-policy-v1
+policy:
+  min_frames: 81
+  minimum_finite_ratio: 1.0
+  abrupt_warning_ratio: 0.02
+  abrupt_action_block_ratio: 0.20
+  extreme_abrupt_action_block_ratio: 0.05
+  timestamp_gap_warning_factor: 3.0
+  timestamp_jitter_warning_ratio: 0.25
+  declared_fps_warning_relative_error: 0.10
+  action_alignment_min_score: 0.20
+  action_alignment_max_lag_s: 0.50
+  min_prompt_characters: 2
+  bad_interval_padding_frames: 1
+  quaternion_norm_tolerance: 0.05
+  quaternion_max_step_rad: 1.5
+  extreme_abrupt_multiplier: 10.0
+  sparse_visual_sample_count: 9
+  sparse_visual_max_cameras: 3
+  visual_dark_value: 10
+  visual_bright_value: 245
+  visual_extreme_pixel_ratio: 0.98
+  visual_minimum_entropy: 0.08
+  visual_minimum_laplacian_variance: 0.0005
+  visual_freeze_mean_absolute_difference: 0.002
+  visual_freeze_dhash_distance: 1

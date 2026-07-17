@@ -1,0 +1,40 @@
+schema_version: fastwam-training-profiles-v1
+defaults:
+  enabled_modes: [joint_video_action, video_only]
+  mixture_weight: 1.0
+  quality_weights:
+    A: 1.0
+    B: 0.5
+  loss_weights:
+    video: 1.0
+    action: 1.0
+  camera_priority:
+    - global_primary
+    - global_secondary
+    - left_wrist
+    - right_wrist
+    - auxiliary
+  language_fallback: task_namespace
+  normalization_scope: embodiment_and_active_slots
+datasets:
+  oxe:
+    input_family: tar_pickled_rlds_episode
+    action_gate: restricted_decode_and_verified_canonical_mapping
+  oxe_auge:
+    input_family: lerobot_and_lineage_linked_augmentation
+    action_gate: verified_canonical_mapping
+  agibot_beta:
+    input_family: observation_tar_with_external_parameters
+    action_gate: parameters_join_and_verified_canonical_mapping
+  robocoin:
+    input_family: lerobot_v2_1
+    action_gate: verified_canonical_mapping_and_alignment
+  robomind:
+    input_family: split_archive_hdf5
+    action_gate: hdf5_decode_and_verified_canonical_mapping
+  galaxea:
+    input_family: tar_contained_lerobot_v2_1
+    action_gate: verified_canonical_mapping_and_alignment
+  interndata_a1:
+    input_family: assets_or_lerobot_trajectories
+    action_gate: trajectory_presence_and_verified_canonical_mapping
