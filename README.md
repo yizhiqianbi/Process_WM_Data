@@ -1,15 +1,20 @@
 # FastWAM Multi-Dataset Preprocessing
 
 This directory contains the executable preprocessing and cleaning pipeline for OXE,
-OXE-AugE, AgiBot-Beta, RoboCOIN, RoboMIND, Galaxea, and InternData-A1. Raw data is
-read-only. Generated metadata and canonical sidecars are written below `work/`.
+OXE-AugE, AgiBot-Beta, RoboCOIN, RoboMIND, Galaxea, InternData-A1, LingBot-VA
+post-training data, and DreamZero-DROID. Raw data is read-only. Generated metadata and
+canonical sidecars are written below `work/`.
 
 This repository contains code and metadata contracts only. It does not redistribute raw
 datasets, model weights, generated `work/` artifacts, or authentication tokens.
 
 Raw downloads are handled by the portable, commit-locked downloader documented in
-[`DATA_DOWNLOAD.md`](DATA_DOWNLOAD.md). It supports all seven datasets, gated access checks,
-parallel resume, local status, and remote file-size verification.
+[`DATA_DOWNLOAD.md`](DATA_DOWNLOAD.md). It supports all nine logical datasets, gated access
+checks, parallel resume, local status, and remote file-size verification.
+
+The LingBot-VA/DreamZero source schemas, verified action slices, camera layouts, model-profile
+differences, commands, and real-sample 81/80/21 results are documented in
+[`LINGBOT_VA_DREAMZERO.md`](LINGBOT_VA_DREAMZERO.md).
 
 The latest executable acceptance matrix, including the distinction between completed data-path
 validation and pending production/GPU gates, is in
@@ -144,10 +149,12 @@ python3 scripts/preprocess_robocoin.py pipeline --max-episodes 20 --verify-files
 | OXE | Restricted tar-contained pickle reader; ASU xyz+rpy conversion | ASU UR5 is A-tier; every other OXE subset remains independently gated |
 | OXE-AugE | One episode per target robot; next replay state as a derived target | A-tier derived action is not a native hardware command; preserve lineage/domain labels |
 | AgiBot-Beta | Observation tar plus indexed `proprio_stats.h5` episode join | Real episode 673828 is A-tier with 20 active slots and 18 action windows; full proprio download is still in progress |
+| LingBot-VA | Recursive LeRobot v2.1 RoboTwin/LIBERO discovery; verified EEF/gripper conversion | Full repositories and production stats are not yet materialized |
+| DreamZero-DROID | LeRobot v2.0 plus `modality.json`; isolated Panda joint/gripper slices | Relative-joint transform remains an explicit training-loader policy |
 | RoboMIND | Native HDF5, embedded images, official per-embodiment master/puppet table | Only official contract-table embodiments can enter A-tier |
 | InternData-A1 | Native LeRobot action/state schema and three-camera decode | Current A2D sample is A-tier; separate real/sim normalization domains |
 
-Cleaning thresholds are versioned in `configs/cleaning_policy_v1.yaml`; the seven resolved
+Cleaning thresholds are versioned in `configs/cleaning_policy_v1.yaml`; the nine resolved
 dataset profiles are in `configs/training_profiles.yaml`. Every successful dataset pipeline
 contains `cases/training_cases.jsonl`, `cases/example_case.json`, and the exact contract.
 
@@ -164,7 +171,8 @@ The materializer remains a sidecar stage, while the FastWAM repository now inclu
 normalization per embodiment domain, composes semantic camera slots, and forwards A/B-tier
 sample-level loss masks into FastWAM. The first real RoboCOIN 81/80/21 training and checkpoint
 resume proof is documented in `FASTWAM_TRAINING_INTEGRATION.md`. Preprocessing now produces
-81/80/21 joint cases for all seven currently sampled datasets. The stats builder now discovers
+81/80/21 joint cases for all seven original datasets and the new LingBot-VA/DreamZero real
+schema samples. The stats builder now discovers
 pipeline manifests and admits only train/A-tier/joint cases; full-dataset statistics and the
 combined Stage 2 optimizer regression must still be rebuilt before production training.
 
@@ -190,6 +198,7 @@ The repository-local design and execution references are
 [`CLEANING_PIPELINE_V2.md`](CLEANING_PIPELINE_V2.md),
 [`ACTION_DATA_ADMISSION.md`](ACTION_DATA_ADMISSION.md),
 [`AGIBOT_PROPRIO_TRAINING.md`](AGIBOT_PROPRIO_TRAINING.md),
+[`LINGBOT_VA_DREAMZERO.md`](LINGBOT_VA_DREAMZERO.md),
 [`VALIDATION_STATUS.md`](VALIDATION_STATUS.md),
 [`DATA_DOWNLOAD.md`](DATA_DOWNLOAD.md), and
 [`THREE_STAGE_FASTWAM_TRAINING.md`](THREE_STAGE_FASTWAM_TRAINING.md).

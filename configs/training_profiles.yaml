@@ -26,6 +26,12 @@ datasets:
   agibot_beta:
     input_family: observation_tar_with_proprio_stats_hdf5
     action_gate: proprio_episode_join_and_verified_canonical_mapping
+  lingbot_va:
+    input_family: lingbot_va_lerobot_v2_1
+    action_gate: official_embodiment_schema_and_verified_alignment
+  dreamzero:
+    input_family: dreamzero_droid_lerobot_v2_with_gear_modality
+    action_gate: verified_modality_slices_and_alignment
   robocoin:
     input_family: lerobot_v2_1
     action_gate: verified_canonical_mapping_and_alignment

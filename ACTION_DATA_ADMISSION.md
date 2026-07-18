@@ -6,7 +6,7 @@
 
 ## 1. 当前结论
 
-七个数据集的当前真实样本都已生成 `joint_video_action` case；这表示逐库接入路径通过，
+九个逻辑数据集的当前真实样本都已生成 `joint_video_action` case；这表示逐库接入路径通过，
 不表示全量数据已经完成下载和清洗：
 
 | 数据集 | 当前 action 状态 | 当前验证范围 | 81/80 实测 |
@@ -18,6 +18,8 @@
 | RoboMIND | 按官方本体表开放 | 本地 `h5_ur_1rgb` 样本 | 通过 |
 | Galaxea | 开放 | 本地 `r1lite` LeRobot 样本 | 通过 |
 | InternData-A1 | 开放 | 本地 `a2d` LeRobot 样本 | 通过 |
+| LingBot-VA | 按官方本体 schema 开放 | 固定 SHA 的 RoboTwin/LIBERO episode 0 | 通过，3/1 个窗口 |
+| DreamZero-DROID | 按 `modality.json` slice 开放 | 固定 SHA 的 DROID episode 0 | 通过，6 个窗口 |
 
 这里的“通过”表示真实源文件完成 `scan -> clean -> materialize -> windows -> cases`，并至少产出一个包含 81 个 canonical state 点、80 个 canonical action transition 和 21 个视频采样点的训练 case。它不表示全量下载已经完成，也不表示所有本体和子数据集都已自动获得 action 权限。
 
@@ -330,6 +332,8 @@ valid-index 交集、InternData 命名、局部 bad interval、normalization 过
 | OXE contract | `fastwam_preprocess/adapters/oxe.py` |
 | OXE-AugE target variants | `fastwam_preprocess/adapters/oxe_auge.py` |
 | AgiBot observation/proprio join | `fastwam_preprocess/adapters/agibot.py` |
+| LingBot-VA RoboTwin/LIBERO contract | `fastwam_preprocess/adapters/lingbot_va.py` |
+| DreamZero GEAR modality contract | `fastwam_preprocess/adapters/dreamzero.py` |
 | RoboMIND official embodiment table | `fastwam_preprocess/adapters/robomind.py` |
 | LeRobot schema selection | `fastwam_preprocess/adapters/lerobot.py` |
 | cleaning thresholds | `configs/cleaning_policy_v1.yaml` |
@@ -339,9 +343,9 @@ valid-index 交集、InternData 命名、局部 bad interval、normalization 过
 1. 续传 AgiBot 剩余六个 `proprio_stats` tar 和全部 `task_info`，再执行全量 join/size 验证。
 2. 为 OXE 其余子数据集逐个建立 action type、frame、frequency 和 mapping contract，不能从 ASU 外推。
 3. 扫描 RoboMIND 全量 embodiment 命中率；未列入官方 contract 表的本体继续保持 B 级。
-4. 对七个已开放样本路径运行全量 manifest，统计 hard interval、alignment lag 和 action slot 覆盖率。
+4. 对九个已开放样本路径运行全量 manifest，统计 hard interval、alignment lag 和 action slot 覆盖率。
 5. 用全量 train split 重建每个 embodiment 的 normalization statistics。
-6. 更新 FastWAM Stage 2 多数据集 stats 后，再做一次七域真实 optimizer/checkpoint/resume 回归。
+6. 更新 FastWAM Stage 2 多数据集 stats 后，再做一次九域真实 optimizer/checkpoint/resume 回归。
 
-最后一项尚未执行。当前已经证明的是七个数据集的样本级处理路径能产出统一 action case，
-不应把它表述为七域 FastWAM 正式预训练已经完成。
+最后一项尚未执行。当前已经证明的是九个逻辑数据集的样本级处理路径能产出统一 action
+case，不应把它表述为九域 FastWAM 正式预训练已经完成。

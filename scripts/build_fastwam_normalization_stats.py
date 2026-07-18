@@ -17,6 +17,8 @@ DATASETS = (
     "oxe",
     "oxe_auge",
     "agibot_beta",
+    "lingbot_va",
+    "dreamzero",
     "robocoin",
     "robomind",
     "galaxea",

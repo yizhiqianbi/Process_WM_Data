@@ -1,14 +1,16 @@
 {
   "counts_by_dataset": {
     "agibot_beta": 1,
+    "dreamzero": 1,
     "galaxea": 1,
     "interndata_a1": 1,
+    "lingbot_va": 2,
     "oxe": 1,
     "oxe_auge": 197,
-    "robocoin": 769,
+    "robocoin": 771,
     "robomind": 1
   },
-  "generated_at_utc": "2026-07-16T22:57:55.212621+00:00",
+  "generated_at_utc": "2026-07-18T08:09:23.984856+00:00",
   "repositories": [
     {
       "dataset": "agibot_beta",
@@ -21,6 +23,18 @@
       "repo_id": "agibot-world/AgiBotWorld-Beta",
       "repo_type": "dataset",
       "revision": "2252b3fdc88dc67fa5d5e4b771e1b86f5e71c278"
+    },
+    {
+      "dataset": "dreamzero",
+      "display_name": "DreamZero-DROID data",
+      "gated": false,
+      "group_dir": "DreamZero",
+      "last_modified": "2026-02-17T02:01:08+00:00",
+      "local_name": "DreamZero-DROID-Data",
+      "private": false,
+      "repo_id": "GEAR-Dreams/DreamZero-DROID-Data",
+      "repo_type": "dataset",
+      "revision": "2abc197ca7f14f53a6bf464bf80018ce998f18cc"
     },
     {
       "dataset": "galaxea",
@@ -45,6 +59,30 @@
       "repo_id": "InternRobotics/InternData-A1",
       "repo_type": "dataset",
       "revision": "56450d831fff01a9091ccde5a8b68c103a775a60"
+    },
+    {
+      "dataset": "lingbot_va",
+      "display_name": "LingBot-VA post-training data",
+      "gated": false,
+      "group_dir": "LingBot_VA",
+      "last_modified": "2026-04-24T04:47:48+00:00",
+      "local_name": "libero-long-lerobot",
+      "private": false,
+      "repo_id": "robbyant/libero-long-lerobot",
+      "repo_type": "dataset",
+      "revision": "8c0313b1c7cd9fa3798798479cbf59b11af8979d"
+    },
+    {
+      "dataset": "lingbot_va",
+      "display_name": "LingBot-VA post-training data",
+      "gated": false,
+      "group_dir": "LingBot_VA",
+      "last_modified": "2026-02-17T07:59:41+00:00",
+      "local_name": "robotwin-clean-and-aug-lerobot",
+      "private": false,
+      "repo_id": "robbyant/robotwin-clean-and-aug-lerobot",
+      "repo_type": "dataset",
+      "revision": "595d4acc7e026aa57afba218f4170c6d79e39103"
     },
     {
       "dataset": "oxe",
@@ -4119,6 +4157,18 @@
       "display_name": "RoboCOIN",
       "gated": false,
       "group_dir": "RoboCOIN",
+      "last_modified": "2026-07-17T03:16:11+00:00",
+      "local_name": "AI2_Alphabot_2_organize_cosmetics",
+      "private": false,
+      "repo_id": "RoboCOIN/AI2_Alphabot_2_organize_cosmetics",
+      "repo_type": "dataset",
+      "revision": "d5bde6f5c0d3ffbc6e4ded2dcc248d172ec1236a"
+    },
+    {
+      "dataset": "robocoin",
+      "display_name": "RoboCOIN",
+      "gated": false,
+      "group_dir": "RoboCOIN",
       "last_modified": "2026-07-16T09:55:45+00:00",
       "local_name": "AI2_Alphabot_2_organize_cosmetics_1",
       "private": false,
@@ -4456,11 +4506,23 @@
       "gated": "auto",
       "group_dir": "RoboCOIN",
       "last_modified": "2026-07-16T09:52:05+00:00",
+      "local_name": "AI2_Alphabot_2_store_toys",
+      "private": false,
+      "repo_id": "RoboCOIN/AI2_Alphabot_2_store_toys",
+      "repo_type": "dataset",
+      "revision": "6baa7d516aa9f5695fc1e27031653655f2dd16d5"
+    },
+    {
+      "dataset": "robocoin",
+      "display_name": "RoboCOIN",
+      "gated": false,
+      "group_dir": "RoboCOIN",
+      "last_modified": "2026-07-17T03:12:04+00:00",
       "local_name": "AI2_Alphabot_2_store_toys_1",
       "private": false,
       "repo_id": "RoboCOIN/AI2_Alphabot_2_store_toys_1",
       "repo_type": "dataset",
-      "revision": "6baa7d516aa9f5695fc1e27031653655f2dd16d5"
+      "revision": "9f49c367e1b697a297eb5e8a595d30abb001441c"
     },
     {
       "dataset": "robocoin",
@@ -10275,12 +10337,12 @@
       "display_name": "RoboCOIN",
       "gated": false,
       "group_dir": "RoboCOIN",
-      "last_modified": "2026-07-15T08:00:11+00:00",
+      "last_modified": "2026-07-18T08:00:10+00:00",
       "local_name": "pageAssets",
       "private": false,
       "repo_id": "RoboCOIN/pageAssets",
       "repo_type": "dataset",
-      "revision": "9188a9fd3f5a4efb0c5c0ad342d67af45ba78014"
+      "revision": "c9fcf605ad75088b935c77b982a89d268f09b88d"
     },
     {
       "dataset": "robocoin",
@@ -11663,7 +11725,7 @@
       "revision": "e7ffe31d1fe983a42c3d7b79d192f554fc05b86e"
     }
   ],
-  "repository_count": 971,
+  "repository_count": 976,
   "schema_version": "fastwam-download-lock-v1",
-  "source_config_sha256": "b60579e23ca78afb7d43aada1c304237aadc31c22842bac1ab26f77e7ff4823a"
+  "source_config_sha256": "5148ca848dc2e67fde3b5c4d462188d78e8e5ec312aba7893bc40d1c70d7aebc"
 }

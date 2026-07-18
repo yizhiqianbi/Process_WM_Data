@@ -1,3 +1,4 @@
+import math
 import tempfile
 import unittest
 from pathlib import Path
@@ -56,6 +57,49 @@ class EpisodeSourceReaderTest(unittest.TestCase):
             table["fastwam.action.next_joint_target"].to_pylist(),
             [[1.0, 0.0], [2.0, 1.0], [2.0, 1.0]],
         )
+
+    def test_quaternion_pose_derivation_uses_declared_order(self):
+        path = self.root / "quaternion.parquet"
+        half_angle = math.pi / 4.0
+        pq.write_table(
+            pa.table(
+                {
+                    "pose": [
+                        [1.0, 2.0, 3.0, 0.0, 0.0, 0.0, 1.0],
+                        [
+                            1.0,
+                            2.0,
+                            3.0,
+                            0.0,
+                            0.0,
+                            math.sin(half_angle),
+                            math.cos(half_angle),
+                        ],
+                    ]
+                }
+            ),
+            path,
+        )
+        record = {
+            "source_uri": str(path),
+            "metadata": {
+                "native_conversion": {
+                    "source_format": "parquet",
+                    "derived_columns": {
+                        "fastwam.pose": {
+                            "source_key": "pose",
+                            "operation": "pose_quaternion_to_rotvec",
+                            "quaternion_order": "xyzw",
+                        }
+                    },
+                }
+            },
+        }
+        with ParquetSourceReader() as reader:
+            table = reader.read_record(record, columns=["fastwam.pose"])
+        first, second = table["fastwam.pose"].to_pylist()
+        self.assertEqual(first, [1.0, 2.0, 3.0, 0.0, 0.0, 0.0])
+        self.assertAlmostEqual(second[-1], math.pi / 2.0)
 
     def test_hdf5_reader_normalizes_nanosecond_timestamp(self):
         path = self.root / "proprio_stats.h5"

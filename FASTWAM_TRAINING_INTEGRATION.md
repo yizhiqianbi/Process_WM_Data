@@ -320,7 +320,7 @@ proprio token 会被置零并在 context mask 中关闭。
 - [x] 权重 checkpoint 和完整训练状态 checkpoint。
 - [x] 从 step 1 恢复并继续到 step 2。
 - [x] 当前 27/27 窗口全量解码验证。
-- [ ] 七个数据集的全量 TrainingCaseV1 生成与分布审计。
+- [ ] 九个逻辑数据集的全量 TrainingCaseV1 生成与分布审计。
 - [x] canonical mask-aware validation/inference evaluator（normalized action 指标）。
 - [ ] 按 normalization domain 反归一化到物理单位的 evaluator。
 - [ ] 多数据集分层 sampler 与正式长跑配置。

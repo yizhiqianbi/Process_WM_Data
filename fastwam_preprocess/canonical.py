@@ -198,6 +198,20 @@ def infer_canonical_mapping(
     }
 
 
+def infer_unverified_canonical_mapping(
+    feature_schema: dict[str, Any], *, kind: str, verification_note: str
+) -> dict[str, Any]:
+    """Retain inferred candidates without admitting an unknown schema for training."""
+    mapping = infer_canonical_mapping(feature_schema, kind=kind)
+    mapping["candidate_valid_slots"] = list(mapping.get("valid_slots") or [])
+    mapping["valid_slots"] = []
+    mapping["verified"] = False
+    mapping["verification_note"] = verification_note
+    for item in mapping.get("mappings") or []:
+        item["active"] = False
+    return mapping
+
+
 def build_verified_mapping(
     feature_schema: dict[str, Any],
     *,

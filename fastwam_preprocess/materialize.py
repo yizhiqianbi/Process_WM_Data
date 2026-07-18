@@ -378,6 +378,12 @@ def materialize_canonical(
                 "cameras": record.get("cameras") or [],
                 "videos": (record.get("references") or {}).get("videos") or {},
                 "references": record.get("references") or {},
+                "source_profile": (record.get("metadata") or {}).get("source_profile")
+                or {},
+                "source_episode_metadata": (record.get("metadata") or {}).get(
+                    "source_episode_metadata"
+                )
+                or {},
                 "quality": quality,
                 "training_admission": admission,
                 "stage_admission": record.get("stage_admission")

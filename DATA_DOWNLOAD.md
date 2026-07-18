@@ -1,8 +1,9 @@
 # FastWAM Raw Dataset Download
 
 This document is the portable download runbook for OXE, OXE-AugE, AgiBot-Beta,
-RoboCOIN, RoboMIND, Galaxea, and InternData-A1. The code directory does not contain
-credentials, raw data, Hugging Face cache, or download logs.
+RoboCOIN, RoboMIND, Galaxea, InternData-A1, LingBot-VA post-training data, and
+DreamZero-DROID. The code directory does not contain credentials, raw data, Hugging Face
+cache, or download logs.
 
 ## 1. Local layout
 
@@ -13,6 +14,8 @@ DATA_ROOT/
 ├── OXE_OpenX_Embodiment/jxu124_OpenX-Embodiment/
 ├── OXE_AugE/<repository directories>/
 ├── AgiBot_Beta/AgiBotWorld-Beta/
+├── LingBot_VA/{robotwin-clean-and-aug-lerobot,libero-long-lerobot}/
+├── DreamZero/DreamZero-DROID-Data/
 ├── RoboCOIN/<repository directories>/
 ├── RoboMIND/RoboMIND/
 ├── Galaxea/Galaxea-Open-World-Dataset/
@@ -53,7 +56,7 @@ the lock, run manifest, marker, event log, or error report.
 
 ## 3. Reproducible manifest
 
-`configs/download_sources.yaml` describes the seven logical datasets. OXE-AugE and
+`configs/download_sources.yaml` describes the nine logical datasets. OXE-AugE and
 RoboCOIN are HF organizations containing many independent dataset repositories. Resolve
 the organization listing and all fixed repositories to immutable commit SHAs:
 
@@ -121,6 +124,11 @@ python3 scripts/download_datasets.py download \
   --repo-pattern 'RoboCOIN/Agilex_*' \
   --repo-jobs 4 \
   --file-workers 2
+
+python3 scripts/download_datasets.py download \
+  --datasets lingbot_va dreamzero \
+  --repo-jobs 3 \
+  --file-workers 4
 ```
 
 `repo-jobs * file-workers` is the approximate upper bound on concurrent file requests.
@@ -245,7 +253,8 @@ make the operation idempotent at a specific upstream commit.
 
 ## 8. Moving the code to another server
 
-The code is independent of the original server layout. Export it without generated work:
+The code is independent of the original server layout. Export it without Git history,
+generated work, downloaded data, model weights, or tokens:
 
 ```bash
 scripts/export_code.sh /tmp/Preprocess_FastWAM.tar.gz

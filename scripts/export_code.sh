@@ -19,6 +19,7 @@ fi
 
 mkdir -p -- "$(dirname -- "$OUTPUT")"
 tar \
+  --exclude="$PROJECT_NAME/.git" \
   --exclude="$PROJECT_NAME/work" \
   --exclude="$PROJECT_NAME/.pytest_cache" \
   --exclude="$PROJECT_NAME/.fastwam_download" \
@@ -27,6 +28,18 @@ tar \
   --exclude='*.pyo' \
   --exclude='*.token' \
   --exclude='*token*.txt' \
+  --exclude='*.safetensors' \
+  --exclude='*.ckpt' \
+  --exclude='*.pth' \
+  --exclude='*.pt' \
+  --exclude='*.bin' \
+  --exclude='*.mp4' \
+  --exclude='*.parquet' \
+  --exclude='*.hdf5' \
+  --exclude='*.h5' \
+  --exclude='*.tar' \
+  --exclude='*.tar.gz' \
+  --exclude='*.zip' \
   -czf "$OUTPUT" \
   -C "$PROJECT_PARENT" \
   "$PROJECT_NAME"

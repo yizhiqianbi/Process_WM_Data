@@ -18,6 +18,10 @@ policy:
   # 0.01 rad/frame suppresses quantization/noise false positives on a nearly
   # stationary arm; the hard interval threshold remains 10x larger.
   joint_position_abrupt_step_floor_rad: 0.01
+  # EEF pose vectors mix metres and radians. A 0.01 per-frame floor keeps
+  # ordinary high-rate motion from becoming a hard outlier while preserving
+  # the 0.1 extreme-step gate through extreme_abrupt_multiplier.
+  ee_pose_abrupt_step_floor: 0.01
   sparse_visual_sample_count: 9
   sparse_visual_max_cameras: 3
   visual_dark_value: 10

@@ -35,6 +35,7 @@ class CleaningPolicy:
     quaternion_max_step_rad: float = 1.50
     extreme_abrupt_multiplier: float = 10.0
     joint_position_abrupt_step_floor_rad: float = 0.01
+    ee_pose_abrupt_step_floor: float = 0.01
     sparse_visual_sample_count: int = 9
     sparse_visual_max_cameras: int = 3
     visual_dark_value: int = 10
@@ -94,11 +95,15 @@ def _signal_metrics(
 ) -> dict[str, Any]:
     policy = policy or CleaningPolicy()
     source_name = str(source_key or "").lower()
-    joint_position_floor = (
+    minimum_abrupt_step = (
         policy.joint_position_abrupt_step_floor_rad
         if "joint" in source_name and "position" in source_name
         else 0.0
     )
+    if "ee_" in source_name and any(
+        token in source_name for token in ("pose", "target", "delta")
+    ):
+        minimum_abrupt_step = max(minimum_abrupt_step, policy.ee_pose_abrupt_step_floor)
     return analyze_signal(
         values,
         feature=feature,
@@ -110,7 +115,7 @@ def _signal_metrics(
         quaternion_norm_tolerance=policy.quaternion_norm_tolerance,
         quaternion_max_step_rad=policy.quaternion_max_step_rad,
         extreme_abrupt_multiplier=policy.extreme_abrupt_multiplier,
-        minimum_abrupt_step=joint_position_floor,
+        minimum_abrupt_step=minimum_abrupt_step,
     )
 
 
@@ -212,7 +217,15 @@ def _velocity_semantics(mapping: dict[str, Any]) -> bool:
     ).lower()
     return any(
         token in text
-        for token in ("velocity", "velocities", "speed", "twist", "_vel")
+        for token in (
+            "velocity",
+            "velocities",
+            "speed",
+            "twist",
+            "_vel",
+            "delta_",
+            "_delta",
+        )
     )
 
 

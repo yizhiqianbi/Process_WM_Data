@@ -23,6 +23,25 @@ def _shape(feature: dict[str, Any]) -> list[int] | None:
     return result
 
 
+def feature_names(feature: dict[str, Any]) -> list[str] | None:
+    """Normalize the name layouts emitted by LeRobot v2.x metadata writers."""
+    value = feature.get("names")
+    if isinstance(value, dict):
+        flattened: list[str] = []
+        for names in value.values():
+            if isinstance(names, list):
+                flattened.extend(str(name) for name in names)
+            elif names is not None:
+                flattened.append(str(names))
+        return flattened or None
+    if isinstance(value, list):
+        if len(value) == 1 and isinstance(value[0], list):
+            return [str(name) for name in value[0]]
+        if all(not isinstance(name, (dict, list)) for name in value):
+            return [str(name) for name in value]
+    return None
+
+
 def _feature_schema(features: dict[str, Any], prefixes: tuple[str, ...]) -> dict[str, Any]:
     result: dict[str, Any] = {}
     for key, feature in features.items():
@@ -31,7 +50,7 @@ def _feature_schema(features: dict[str, Any], prefixes: tuple[str, ...]) -> dict
         result[key] = {
             "dtype": feature.get("dtype"),
             "shape": _shape(feature),
-            "names": feature.get("names"),
+            "names": feature_names(feature),
         }
     return result
 
@@ -41,14 +60,25 @@ def camera_records(features: dict[str, Any]) -> list[CameraRecord]:
     for key, feature in features.items():
         if not isinstance(feature, dict):
             continue
-        info = feature.get("info")
-        info = info if isinstance(info, dict) else {}
+        info: dict[str, Any] = {}
+        for info_key in ("video_info", "info"):
+            candidate = feature.get(info_key)
+            if isinstance(candidate, dict):
+                info.update(candidate)
         dtype = str(feature.get("dtype", "")).lower()
         if dtype != "video" and "video.codec" not in info:
             continue
         shape = _shape(feature) or []
-        height = info.get("video.height", shape[0] if len(shape) >= 2 else None)
-        width = info.get("video.width", shape[1] if len(shape) >= 2 else None)
+        names = feature_names(feature) or []
+
+        def named_dimension(name: str, fallback_index: int) -> Any:
+            try:
+                return shape[names.index(name)]
+            except (ValueError, IndexError):
+                return shape[fallback_index] if len(shape) > fallback_index else None
+
+        height = info.get("video.height", named_dimension("height", 0))
+        width = info.get("video.width", named_dimension("width", 1))
         records.append(
             CameraRecord(
                 source_key=key,
@@ -284,6 +314,11 @@ def scan_lerobot_repo(
                         "codebase_version": info.get("codebase_version"),
                         "calibration_keys": calibration_keys,
                         "source_info_path": str(info_path),
+                        "source_episode_metadata": {
+                            key: row[key]
+                            for key in ("action_config", "success")
+                            if key in row
+                        },
                         "canonical_mapping": variant_mapping,
                         **variant_metadata,
                     },

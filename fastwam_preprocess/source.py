@@ -273,6 +273,39 @@ class ParquetSourceReader:
             ]
         return [x, y, z, *rotation]
 
+    @staticmethod
+    def _quaternion_pose_to_rotvec(row: Any, order: str) -> list[float]:
+        values = [float(value) for value in row]
+        if len(values) != 7:
+            raise ValueError(
+                f"Expected xyz+quaternion pose with 7 values, got {len(values)}"
+            )
+        x, y, z = values[:3]
+        quaternion = values[3:]
+        if order == "xyzw":
+            qx, qy, qz, qw = quaternion
+        elif order == "wxyz":
+            qw, qx, qy, qz = quaternion
+        else:
+            raise ValueError(f"Unsupported quaternion order: {order}")
+        norm = math.sqrt(qw * qw + qx * qx + qy * qy + qz * qz)
+        if not math.isfinite(norm) or norm <= 1e-12:
+            raise ValueError("Quaternion norm must be finite and non-zero")
+        qw, qx, qy, qz = (value / norm for value in (qw, qx, qy, qz))
+        vector_norm = math.sqrt(qx * qx + qy * qy + qz * qz)
+        if vector_norm <= 1e-12:
+            rotation = [0.0, 0.0, 0.0]
+        else:
+            angle = 2.0 * math.atan2(vector_norm, max(-1.0, min(1.0, qw)))
+            if angle > math.pi:
+                angle -= 2.0 * math.pi
+            rotation = [
+                angle * qx / vector_norm,
+                angle * qy / vector_norm,
+                angle * qz / vector_norm,
+            ]
+        return [x, y, z, *rotation]
+
     def _apply_derived_columns(self, table: Any, record: dict[str, Any]):
         import pyarrow as pa
 
@@ -295,6 +328,9 @@ class ParquetSourceReader:
             operation = str(spec.get("operation") or "identity")
             if operation == "pose_rpy_to_rotvec":
                 values = [self._rpy_pose_to_rotvec(row) for row in values]
+            elif operation == "pose_quaternion_to_rotvec":
+                order = str(spec.get("quaternion_order") or "xyzw")
+                values = [self._quaternion_pose_to_rotvec(row, order) for row in values]
             elif operation == "next_row_hold_last":
                 values = [*values[1:], values[-1]] if values else []
             elif operation != "identity":

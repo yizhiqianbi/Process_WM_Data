@@ -28,6 +28,26 @@ datasets:
         - repo_id: agibot-world/AgiBotWorld-Beta
           local_name: AgiBotWorld-Beta
 
+  lingbot_va:
+    display_name: LingBot-VA post-training data
+    group_dir: LingBot_VA
+    source:
+      type: fixed
+      repositories:
+        - repo_id: robbyant/robotwin-clean-and-aug-lerobot
+          local_name: robotwin-clean-and-aug-lerobot
+        - repo_id: robbyant/libero-long-lerobot
+          local_name: libero-long-lerobot
+
+  dreamzero:
+    display_name: DreamZero-DROID data
+    group_dir: DreamZero
+    source:
+      type: fixed
+      repositories:
+        - repo_id: GEAR-Dreams/DreamZero-DROID-Data
+          local_name: DreamZero-DROID-Data
+
   robocoin:
     display_name: RoboCOIN
     group_dir: RoboCOIN

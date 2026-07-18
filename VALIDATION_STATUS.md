@@ -11,7 +11,9 @@ from this repository.
 
 | Gate | Status | Evidence |
 |---|---|---|
-| Seven dataset adapters | Passed on current real samples | Every dataset produces a `TrainingCaseV1` path |
+| Original seven dataset adapters | Passed on current real samples | Every original dataset produces a `TrainingCaseV1` path |
+| LingBot-VA adapters | Passed on pinned real samples | RoboTwin and LIBERO both produce joint 81/80/21 cases |
+| DreamZero-DROID adapter | Passed on pinned real sample | Verified GEAR slices produce a joint 81/80/21 case |
 | Unified FastWAM timeline | Passed | 81 state points, 80 action transitions, 21 video points |
 | AgiBot observation/proprio/task join | Passed | Real task 389 / episode 673828 |
 | AgiBot action admission | Passed | A tier, 18/18 `joint_video_action` windows |
@@ -20,11 +22,23 @@ from this repository.
 | Three-camera FastWAM loader | Passed | `[3,21,384,320]`, all three camera roles present |
 | FastWAM 8/2/1 memory loader | Passed | 11/11 valid history frames, all indices earlier than window start |
 | Text conditioning cache | Passed | `[128,4096]` finite UMT5 context |
-| Preprocessing tests | Passed | 33 tests |
+| Preprocessing tests | Passed | 40 tests |
 | FastWAM integration tests | Passed | 15 tests in the connected FastWAM checkout |
 | AgiBot component download | Running | Locked selection: 224 files, 247.35 GiB, four file workers |
 | AgiBot 5B optimizer/checkpoint smoke | Pending resource gate | Config composes; current job cannot access CUDA/NVML and the host GPUs are occupied |
-| Full seven-domain production stats | Pending full manifests | Validation stats currently cover only locally materialized train/A/joint domains |
+| Full nine-domain production stats | Pending full manifests | Validation stats currently cover only locally materialized train/A/joint domains |
+
+## LingBot-VA and DreamZero proof
+
+Pinned HF files, not invented dimensions, were used to validate the new schemas. RoboTwin
+`blocks_ranking_rgb` episode 0 produced three joint windows with canonical slots `0..13`.
+LIBERO-Long episode 0 produced one joint window with slots `0..6`. DreamZero-DROID episode 0
+produced six joint windows with gripper slot `6` and joint slots `14..20`. All resulting cases
+use 81 state points, 80 actions, and 21 video points.
+
+The full upstream repositories, full video decode, normalization rebuild, and GPU optimizer
+regression remain pending. Exact source layouts and commands are in
+`LINGBOT_VA_DREAMZERO.md`.
 
 ## AgiBot real-data proof
 
@@ -88,7 +102,7 @@ causal-memory data path for a real AgiBot episode. Production Stage 2 still requ
 2. Full-manifest join, rejection, slot-coverage, and alignment reports.
 3. Normalization rebuilt from the frozen full train split.
 4. One GPU optimizer/checkpoint/resume smoke with both video and action losses finite.
-5. A seven-domain balanced optimizer regression before long-running pretraining.
+5. A nine-domain balanced optimizer regression before long-running pretraining.
 
-Detailed contracts are in `AGIBOT_PROPRIO_TRAINING.md`, `ACTION_DATA_ADMISSION.md`,
-`CLEANING_PIPELINE_V2.md`, and `THREE_STAGE_FASTWAM_TRAINING.md`.
+Detailed contracts are in `AGIBOT_PROPRIO_TRAINING.md`, `LINGBOT_VA_DREAMZERO.md`,
+`ACTION_DATA_ADMISSION.md`, `CLEANING_PIPELINE_V2.md`, and `THREE_STAGE_FASTWAM_TRAINING.md`.

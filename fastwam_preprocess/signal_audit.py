@@ -230,6 +230,20 @@ def _angle_dimensions(feature: dict[str, Any], width: int) -> list[int]:
     return result
 
 
+def _gripper_dimensions(feature: dict[str, Any], width: int) -> set[int]:
+    names = feature.get("names") if isinstance(feature, dict) else None
+    source_key = str(feature.get("source_key") or "").lower()
+    if "gripper" in source_key:
+        return set(range(width))
+    if not isinstance(names, list):
+        return set()
+    return {
+        index
+        for index, name in enumerate(names[:width])
+        if "gripper" in str(name).lower()
+    }
+
+
 def _unwrap(values: list[float]) -> tuple[list[float], list[int]]:
     result = list(values)
     wrap_indices: list[int] = []
@@ -384,6 +398,7 @@ def analyze_signal(
         for report in semantic.get("quaternions") or []
         for dimension in report.get("indices") or []
     }
+    gripper_dimensions = _gripper_dimensions(feature_payload, dimension_count)
     non_finite: list[int] = []
     abrupt: list[int] = []
     extreme_abrupt: list[int] = []
@@ -416,6 +431,15 @@ def analyze_signal(
             metrics["abrupt_step_count"] = 0
             metrics["abrupt_step_ratio"] = 0.0
             abrupt_indices = []
+            extreme_abrupt_indices = []
+            derivative_indices = []
+        elif dimension in gripper_dimensions:
+            metrics["semantic_type"] = "zero_order_gripper"
+            metrics["raw_extreme_abrupt_step_count"] = metrics[
+                "extreme_abrupt_step_count"
+            ]
+            metrics["extreme_abrupt_step_count"] = 0
+            metrics["extreme_abrupt_step_ratio"] = 0.0
             extreme_abrupt_indices = []
             derivative_indices = []
         dimensions.append(metrics)

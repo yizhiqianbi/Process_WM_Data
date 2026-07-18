@@ -94,6 +94,23 @@ class SignalAuditTest(unittest.TestCase):
             )
         )
 
+    def test_discrete_gripper_transition_is_not_a_hard_interval(self):
+        values = [[0.0] for _ in range(40)] + [[1.0] for _ in range(40)]
+        metrics = _signal_metrics(
+            values,
+            feature={"names": ["left_gripper_command"]},
+            source_key="fastwam.action.left_gripper",
+        )
+        self.assertEqual(
+            metrics["dimensions"][0]["semantic_type"], "zero_order_gripper"
+        )
+        self.assertFalse(
+            any(
+                interval["severity"] == "hard"
+                for interval in metrics["bad_intervals"]
+            )
+        )
+
     def test_velocity_action_is_aligned_to_state_derivative(self):
         state = [(index / 20.0) ** 2 for index in range(100)]
         action = [

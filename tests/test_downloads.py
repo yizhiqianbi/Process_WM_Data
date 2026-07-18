@@ -69,7 +69,7 @@ def make_repo(name="repo", revision=None):
 
 
 class DownloadConfigTests(unittest.TestCase):
-    def test_checked_in_sources_cover_all_seven_datasets(self):
+    def test_checked_in_sources_cover_all_supported_datasets(self):
         project_root = Path(__file__).resolve().parents[1]
         config = load_source_config(project_root / "configs" / "download_sources.yaml")
         self.assertEqual(
@@ -78,6 +78,8 @@ class DownloadConfigTests(unittest.TestCase):
                 "oxe",
                 "oxe_auge",
                 "agibot_beta",
+                "lingbot_va",
+                "dreamzero",
                 "robocoin",
                 "robomind",
                 "galaxea",

@@ -19,3 +19,19 @@ work/
 *token*.txt
 access_report.json
 verify_report.json
+
+# Keep this repository code-only. Runtime artifacts belong below ignored work/.
+checkpoints/
+models/
+*.safetensors
+*.ckpt
+*.pth
+*.pt
+*.bin
+*.mp4
+*.parquet
+*.hdf5
+*.h5
+*.tar
+*.tar.gz
+*.zip

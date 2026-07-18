@@ -375,6 +375,8 @@ def make_training_case(
         },
         "provenance": {
             "references": row.get("references") or {},
+            "source_profile": row.get("source_profile") or {},
+            "source_episode_metadata": row.get("source_episode_metadata") or {},
             "audit_summary": row.get("audit_summary") or {},
             "bad_intervals": row.get("bad_intervals") or [],
         },

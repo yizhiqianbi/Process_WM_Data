@@ -469,7 +469,11 @@ python3 -m fastwam_preprocess.cli windows \
 - Galaxea 实样：四元数分量误报被几何检查消除，从原先 action blocker 恢复为 A；
 - Galaxea 该样本生成 24 个 81-step window；普通 abrupt 只做 soft flag，不错误降级 action window。
 - InternData-A1 A2D：官方 action schema 优先级和零起始关节名修复后，8 个 action window；
-- 七个数据集的当前实样均产出 `81 state / 80 action / 21 video` 联合 case。
+- 原七个数据集的当前实样均产出 `81 state / 80 action / 21 video` 联合 case。
+- LingBot-VA RoboTwin/LIBERO：官方 16D/7D schema 分别转换为 14/7 个 canonical action
+  slots，固定 HF 实样产出 3/1 个 action window；
+- DreamZero-DROID：按 `modality.json` 隔离 joint/gripper slice，固定 HF 实样产出 6 个
+  action window，未使用的 packed Cartesian/velocity 维度不会污染 hard interval。
 
 自动测试覆盖：
 
@@ -480,11 +484,14 @@ python3 -m fastwam_preprocess.cli windows \
 - OXE pose 派生列和 OXE-AugE next-row target；
 - AgiBot observation/proprio tar join 与纳秒时间戳；
 - InternData source-key contextual mapping；
+- LeRobot nested/dict feature names 和 `video_info` metadata；
+- quaternion pose 到 rotation-vector 派生、离散 gripper zero-order 清洗；
+- LingBot-VA RoboTwin、LIBERO 和 DreamZero 三条完整 TrainingCase fixture；
 - 原有 scan/clean/materialize/windows/cases end-to-end contract。
 
 ## 14. 尚未完成的关键工作
 
-1. 为七个数据集建立全局 fingerprint/near-duplicate index，而不是只在单次 clean 内比较。
+1. 为九个逻辑数据集建立全局 fingerprint/near-duplicate index，而不是只在单次 clean 内比较。
 2. 按 embodiment 配置物理单位、joint/workspace/gripper/velocity/acceleration limits。
 3. 完成 OXE 其余子集 action contract；全量验证 AgiBot 剩余 proprio 分片；统计 RoboMIND 未知本体命中率。
 4. 增加多相机 PTS drift、跨相机同步和视频-control duration drift 的精确检查。

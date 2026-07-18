@@ -18,6 +18,12 @@ datasets:
   agibot_beta:
     root: AgiBot_Beta/AgiBotWorld-Beta
     source_format: observation_tar_plus_proprio_stats_hdf5
+  lingbot_va:
+    root: LingBot_VA
+    source_format: lingbot_va_lerobot_v2_1
+  dreamzero:
+    root: DreamZero/DreamZero-DROID-Data
+    source_format: dreamzero_droid_lerobot_v2_with_gear_metadata
   robocoin:
     root: RoboCOIN
     source_format: lerobot_v2_1

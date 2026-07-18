@@ -175,6 +175,9 @@ def build_window_index(
                 "videos": episode.get("videos") or {},
                 "source_uri": episode.get("source_uri"),
                 "references": episode.get("references") or {},
+                "source_profile": episode.get("source_profile") or {},
+                "source_episode_metadata": episode.get("source_episode_metadata")
+                or {},
                 "quality": quality,
                 "audit_summary": episode.get("audit_summary") or {},
                 "bad_intervals": bad_intervals,
