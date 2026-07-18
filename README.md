@@ -20,6 +20,11 @@ The latest executable acceptance matrix, including the distinction between compl
 validation and pending production/GPU gates, is in
 [`VALIDATION_STATUS.md`](VALIDATION_STATUS.md).
 
+The ordered execution plan for completing FastWAM three-stage training and reproducing the
+LingBot-VLA v2 fine-tuning/validation workflow is in
+[`NEXT_FASTWAM_LINGBOT_VLA_TRAINING.md`](NEXT_FASTWAM_LINGBOT_VLA_TRAINING.md). It also explains
+the naming boundary between the LingBot-VA data source and the LingBot-VLA v2 model.
+
 ## Contract
 
 - Control timeline: resampled to 20 Hz; 81 state points and 80 actions cover 4 seconds.
