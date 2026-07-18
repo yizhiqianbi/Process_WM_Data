@@ -5,6 +5,7 @@ import tarfile
 import tempfile
 import unittest
 from pathlib import Path
+from unittest import mock
 
 import h5py
 
@@ -62,10 +63,24 @@ class AgiBotJoinTest(unittest.TestCase):
             )
 
             output = root / "scan"
-            summary = AgiBotBetaAdapter(
-                AdapterOptions(root, output, max_episodes=1)
-            ).run()
+            real_tar_open = tarfile.open
+            proprio_open_count = 0
+
+            def tracked_tar_open(name, *args, **kwargs):
+                nonlocal proprio_open_count
+                if Path(name) == proprio_tar:
+                    proprio_open_count += 1
+                return real_tar_open(name, *args, **kwargs)
+
+            with mock.patch(
+                "fastwam_preprocess.adapters.agibot.tarfile.open",
+                side_effect=tracked_tar_open,
+            ):
+                summary = AgiBotBetaAdapter(
+                    AdapterOptions(root, output, max_episodes=1)
+                ).run()
             self.assertEqual(summary["episode_count"], 1)
+            self.assertEqual(proprio_open_count, 1)
             record = next(iter_jsonl(output / "episodes.jsonl"))
             self.assertEqual(record["num_frames"], 100)
             self.assertEqual(

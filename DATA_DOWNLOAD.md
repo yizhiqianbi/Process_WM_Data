@@ -141,7 +141,57 @@ Each run writes `events.jsonl`, `summary.json`, and the exact selected lock belo
 `DATA_ROOT/.fastwam_download/runs/`. Per-repository state is written atomically below
 `DATA_ROOT/.fastwam_download/repos/`.
 
-## 5. Status and verification
+## 5. AgiBot action-training components
+
+The full AgiBot repository is tens of terabytes because `observations/` contains the video
+release. When observations already exist, use the component downloader to complete only the
+files required for action training:
+
+```bash
+python3 scripts/download_agibot_training_assets.py \
+  --data-root "$FASTWAM_DATA_ROOT" \
+  --token-file "$HF_TOKEN_FILE" \
+  --file-workers 4
+```
+
+The default selection is commit-locked and consists of:
+
+| Component | Required for Stage 2 | Purpose |
+|---|---|---|
+| `proprio_stats/` | Yes | Per-episode HDF5 state, HAL action, timestamps, and valid action indices |
+| `task_info/` | Yes | Episode-to-task language and task lineage |
+| `parameters/` | No | Camera intrinsics/extrinsics and calibration assets |
+
+At the currently locked revision, `proprio_stats/` contains seven tar shards totaling about
+247 GiB and `task_info/` is about 0.3 GiB. `parameters/` is roughly 1.5 TiB and is therefore
+opt-in; missing calibration does not disable state/action training.
+
+Preview one shard without transferring it:
+
+```bash
+python3 scripts/download_agibot_training_assets.py \
+  --data-root "$FASTWAM_DATA_ROOT" \
+  --token-file "$HF_TOKEN_FILE" \
+  --component proprio_stats \
+  --proprio-shard 648533-713949.tar \
+  --dry-run
+```
+
+Download calibration separately when geometric camera work needs it:
+
+```bash
+python3 scripts/download_agibot_training_assets.py \
+  --data-root "$FASTWAM_DATA_ROOT" \
+  --token-file "$HF_TOKEN_FILE" \
+  --component parameters \
+  --file-workers 4
+```
+
+The downloader verifies every selected file against remote size metadata and atomically writes
+a receipt below `DATA_ROOT/.fastwam_download/components/`. It resumes Hugging Face `.incomplete`
+files and never records the token.
+
+## 6. Status and verification
 
 Fast local status does not contact Hugging Face:
 
@@ -177,7 +227,7 @@ python3 scripts/download_datasets.py verify \
 Use `--max-repos 1` for a quick environment smoke test. Do not use it for a production
 completeness report.
 
-## 6. Running in the background
+## 7. Running in the background
 
 The launcher records a PID and refuses to start a duplicate live process. It uses `tmux`
 when available so the job survives non-interactive SSH or scheduler shells, and falls back
@@ -193,7 +243,7 @@ scripts/start_download_all.sh \
 The machine can be restarted and the identical command rerun. The lock and local metadata
 make the operation idempotent at a specific upstream commit.
 
-## 7. Moving the code to another server
+## 8. Moving the code to another server
 
 The code is independent of the original server layout. Export it without generated work:
 

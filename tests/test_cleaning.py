@@ -67,6 +67,33 @@ class SignalAuditTest(unittest.TestCase):
         self.assertTrue(hard)
         self.assertTrue(any(interval["start"] <= 50 < interval["stop_exclusive"] for interval in hard))
 
+    def test_joint_position_floor_ignores_stationary_encoder_noise(self):
+        values = [[(index % 7) * 1.0e-5] for index in range(100)]
+        metrics = _signal_metrics(
+            values,
+            source_key="state/joint/position",
+            policy=CleaningPolicy(joint_position_abrupt_step_floor_rad=0.01),
+        )
+        dimension = metrics["dimensions"][0]
+        self.assertEqual(dimension["abrupt_threshold_floor"], 0.01)
+        self.assertEqual(dimension["abrupt_step_count"], 0)
+
+    def test_joint_position_floor_preserves_true_hard_jump(self):
+        values = [[index * 0.001] for index in range(100)]
+        values[50] = [1.0]
+        metrics = _signal_metrics(
+            values,
+            source_key="action/joint/position",
+            policy=CleaningPolicy(joint_position_abrupt_step_floor_rad=0.01),
+        )
+        self.assertTrue(
+            any(
+                interval["severity"] == "hard"
+                and interval["start"] <= 50 < interval["stop_exclusive"]
+                for interval in metrics["bad_intervals"]
+            )
+        )
+
     def test_velocity_action_is_aligned_to_state_derivative(self):
         state = [(index / 20.0) ** 2 for index in range(100)]
         action = [

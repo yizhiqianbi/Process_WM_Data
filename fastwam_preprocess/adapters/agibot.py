@@ -4,6 +4,7 @@ import io
 import json
 import re
 import tarfile
+from dataclasses import dataclass
 from pathlib import Path
 from typing import Any
 
@@ -14,6 +15,14 @@ from ..utils import is_partial_path
 from .base import BaseAdapter
 
 _DEPTH_INDEX = re.compile(r"_(\d+)\.png$")
+
+
+@dataclass(frozen=True)
+class _TarMemberRef:
+    archive_path: Path
+    member_name: str
+    offset_data: int
+    size: int
 
 
 def _load_task_metadata(root: Path) -> dict[str, dict[str, Any]]:
@@ -37,14 +46,24 @@ def _load_task_metadata(root: Path) -> dict[str, dict[str, Any]]:
     return result
 
 
-def _inspect_proprio_member(archive_path: Path, member_name: str) -> dict[str, Any]:
+def _read_tar_member(member: _TarMemberRef) -> bytes:
+    # AgiBot proprio shards are uncompressed tar files. TarInfo offsets let us
+    # read one HDF5 payload without rebuilding the 45 GiB archive index.
+    with member.archive_path.open("rb") as stream:
+        stream.seek(member.offset_data)
+        payload = stream.read(member.size)
+    if len(payload) != member.size:
+        raise EOFError(
+            f"Short tar member read: {member.archive_path}!{member.member_name}; "
+            f"expected={member.size}, actual={len(payload)}"
+        )
+    return payload
+
+
+def _inspect_proprio_member(member: _TarMemberRef) -> dict[str, Any]:
     import h5py
 
-    with tarfile.open(archive_path, mode="r:*") as archive:
-        extracted = archive.extractfile(member_name)
-        if extracted is None:
-            raise FileNotFoundError(f"{archive_path}!{member_name}")
-        payload = io.BytesIO(extracted.read())
+    payload = io.BytesIO(_read_tar_member(member))
     paired_keys = [
         ("state/joint/position", "action/joint/position"),
         ("state/effector/position", "action/effector/position"),
@@ -53,6 +72,7 @@ def _inspect_proprio_member(archive_path: Path, member_name: str) -> dict[str, A
     ]
     signals: list[dict[str, Any]] = []
     lengths: list[int] = []
+    valid_index_sets: list[set[int]] = []
     has_timestamp = False
     with h5py.File(payload, mode="r") as handle:
         if "timestamp" in handle:
@@ -74,11 +94,40 @@ def _inspect_proprio_member(archive_path: Path, member_name: str) -> dict[str, A
                     "dimension": int(state_shape[-1]),
                 }
             )
+            action_index_key = f"{action_key.rsplit('/', 1)[0]}/index"
+            if action_index_key in handle and len(handle[action_index_key].shape) == 1:
+                indices = {
+                    int(value)
+                    for value in handle[action_index_key][...].tolist()
+                    if int(value) >= 0
+                }
+                signals[-1]["action_index_key"] = action_index_key
+                valid_index_sets.append(indices)
             lengths.extend([int(state_shape[0]), int(action_shape[0])])
+    row_count = min(lengths) if lengths else None
+    valid_indices = (
+        sorted(
+            index
+            for index in set.intersection(*valid_index_sets)
+            if row_count is not None and 0 <= index < row_count
+        )
+        if valid_index_sets
+        else []
+    )
+    if valid_index_sets and not valid_indices:
+        raise ValueError("AgiBot HDF5 valid action-index intersection is empty")
     return {
         "signals": signals,
-        "num_frames": min(lengths) if lengths else None,
+        "num_frames": len(valid_indices) if valid_index_sets else row_count,
         "has_timestamp": has_timestamp,
+        "valid_index_count": len(valid_indices),
+        "valid_index_start": valid_indices[0] if valid_indices else None,
+        "valid_index_stop_exclusive": valid_indices[-1] + 1 if valid_indices else None,
+        "valid_indices_contiguous": (
+            all(right == left + 1 for left, right in zip(valid_indices, valid_indices[1:]))
+            if valid_indices
+            else None
+        ),
     }
 
 
@@ -207,7 +256,7 @@ class AgiBotBetaAdapter(BaseAdapter):
 
     def scan(self) -> None:
         task_metadata = _load_task_metadata(self.options.input_root)
-        proprio_index: dict[str, tuple[Path, str]] = {}
+        proprio_index: dict[str, _TarMemberRef] = {}
         proprio_root = self.options.input_root / "proprio_stats"
         for proprio_shard in sorted(proprio_root.rglob("*.tar*")):
             if proprio_shard.suffix != ".tar" or is_partial_path(proprio_shard):
@@ -221,7 +270,7 @@ class AgiBotBetaAdapter(BaseAdapter):
             try:
                 with tarfile.open(proprio_shard, mode="r:*") as archive:
                     members = [
-                        member.name
+                        member
                         for member in archive
                         if member.isfile() and member.name.endswith("/proprio_stats.h5")
                     ]
@@ -234,9 +283,17 @@ class AgiBotBetaAdapter(BaseAdapter):
                     metadata={"error": str(exc)},
                 )
                 continue
-            for member_name in members:
-                episode_id = Path(member_name).parent.name
-                proprio_index.setdefault(episode_id, (proprio_shard, member_name))
+            for member in members:
+                episode_id = Path(member.name).parent.name
+                proprio_index.setdefault(
+                    episode_id,
+                    _TarMemberRef(
+                        archive_path=proprio_shard,
+                        member_name=member.name,
+                        offset_data=int(member.offset_data),
+                        size=int(member.size),
+                    ),
+                )
             self.add_artifact(
                 path=proprio_shard,
                 kind="agibot_proprio_shard",
@@ -345,12 +402,11 @@ class AgiBotBetaAdapter(BaseAdapter):
                     "action": infer_canonical_mapping(action_schema, kind="action"),
                 }
                 if proprio is not None:
-                    proprio_shard, proprio_member = proprio
-                    proprio_uri = f"tar://{proprio_shard}!{proprio_member}"
+                    proprio_uri = (
+                        f"tar://{proprio.archive_path}!{proprio.member_name}"
+                    )
                     try:
-                        proprio_inspection = _inspect_proprio_member(
-                            proprio_shard, proprio_member
-                        )
+                        proprio_inspection = _inspect_proprio_member(proprio)
                         state_schema, action_schema, canonical_mapping = (
                             _agibot_contract(proprio_inspection)
                         )
@@ -362,13 +418,15 @@ class AgiBotBetaAdapter(BaseAdapter):
                 task_row = task_metadata.get(episode_id) or {}
                 label_info = task_row.get("label_info") or task_row.get("lable_info") or {}
                 action_config = label_info.get("action_config") or []
-                task_text = str(task_row.get("task_name") or task_id)
+                task_text = str(task_row.get("task_name") or "").strip()
                 action_texts = [
                     str(item.get("action_text")).strip()
                     for item in action_config
                     if isinstance(item, dict) and item.get("action_text")
                 ]
-                tasks = list(dict.fromkeys([task_text, *action_texts]))
+                tasks = list(
+                    dict.fromkeys(value for value in [task_text, *action_texts] if value)
+                )
                 passed = ["archive_member_readable", "episode_boundary"]
                 pending = ["temporal", "signal", "visual", "kinematic"]
                 warnings: list[str] = []
@@ -385,6 +443,9 @@ class AgiBotBetaAdapter(BaseAdapter):
                         ["proprio_download_or_join", "state_action_alignment"]
                     )
                     warnings.append("observation_only_local_snapshot")
+                if not task_row:
+                    pending.append("task_metadata_join")
+                    warnings.append("task_metadata_missing_for_episode")
                 references: dict[str, Any] = {
                     "archive": str(shard),
                     "episode_prefix": f"{episode_id}/",
@@ -407,6 +468,12 @@ class AgiBotBetaAdapter(BaseAdapter):
                     cameras=cameras,
                     state_schema=state_schema,
                     action_schema=action_schema,
+                    action_verified=bool(
+                        proprio_uri
+                        and proprio_error is None
+                        and canonical_mapping["action"].get("verified")
+                    ),
+                    has_calibration=(self.options.input_root / "parameters").exists(),
                     has_depth=bool(depth_indices),
                     complete=bool(cameras) and proprio_error is None,
                     passed_checks=passed,
@@ -432,6 +499,14 @@ class AgiBotBetaAdapter(BaseAdapter):
                                 "source_format": "hdf5",
                                 "timestamp_key": "timestamp",
                                 "action_semantics": "native_hal_command",
+                                "valid_index_keys": sorted(
+                                    {
+                                        str(signal["action_index_key"])
+                                        for signal in proprio_inspection.get("signals") or []
+                                        if signal.get("action_index_key")
+                                    }
+                                ),
+                                "valid_index_policy": "intersection",
                             }
                             if proprio_uri
                             else {}
@@ -439,8 +514,6 @@ class AgiBotBetaAdapter(BaseAdapter):
                     },
                 )
 
-        if not (self.options.input_root / "parameters").exists():
-            self.blockers.append("parameters_directory_missing")
         if not (self.options.input_root / "task_info").exists():
             self.blockers.append("task_info_directory_missing")
         if not proprio_index:

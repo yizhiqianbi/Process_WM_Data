@@ -37,6 +37,15 @@ def parse_args() -> argparse.Namespace:
         type=Path,
         default=PROJECT_ROOT,
     )
+    parser.add_argument(
+        "--normalization-stats",
+        type=Path,
+        default=None,
+        help=(
+            "Canonical train-split statistics. Default: "
+            "PREPROCESS_ROOT/work/stage_pipeline/normalization_stats.json."
+        ),
+    )
     parser.add_argument("--datasets", nargs="+", choices=DATASETS, default=list(DATASETS))
     parser.add_argument("--output", type=Path, default=None)
     parser.add_argument("--fail-fast", action="store_true")
@@ -47,23 +56,20 @@ def _select_history_window(dataset) -> int:
     return next((index for index, ref in enumerate(dataset.samples) if ref.start > 0), 0)
 
 
-def _validate_dataset(name: str, preprocess_root: Path):
+def _validate_dataset(
+    name: str,
+    preprocess_root: Path,
+    normalization_stats: Path,
+):
     from fastwam.datasets.training_case_dataset import MemoryTrainingCaseDataset
 
     manifest = preprocess_root / "work/stage_pipeline" / name / "cases/training_cases.jsonl"
     cache = preprocess_root / "work/stage_pipeline/text_embeds"
     tar_member_cache = preprocess_root / "work/stage_pipeline/video_member_cache"
-    normalization_stats = None
-    include_robot_supervision = name == "robocoin"
-    if include_robot_supervision:
-        normalization_stats = (
-            preprocess_root / "work/fastwam_training/robocoin_81f/normalization_stats.json"
-        )
-
     dataset = MemoryTrainingCaseDataset(
         case_manifests=[str(manifest)],
         data_root=str(preprocess_root),
-        normalization_stats=None if normalization_stats is None else str(normalization_stats),
+        normalization_stats=str(normalization_stats),
         text_embedding_cache_dir=str(cache),
         context_len=128,
         split="train",
@@ -74,10 +80,10 @@ def _validate_dataset(name: str, preprocess_root: Path):
         video_size=[384, 320],
         camera_roles=["global_primary", "left_wrist", "right_wrist"],
         missing_camera_policy="zero",
-        normalization_clip=10.0 if include_robot_supervision else None,
+        normalization_clip=10.0,
         episode_cache_size=1,
         tar_member_cache_dir=str(tar_member_cache),
-        include_robot_supervision=include_robot_supervision,
+        include_robot_supervision=True,
         memory_history_long=8,
         memory_history_mid=2,
         memory_history_short=1,
@@ -158,6 +164,8 @@ def _validate_dataset(name: str, preprocess_root: Path):
         "camera_present_mask": sample["camera_present_mask"].tolist(),
         "active_action_dimensions": action_dimensions,
         "active_state_dimensions": state_dimensions,
+        "active_action_slots": torch.where(~sample["action_dim_is_pad"])[0].tolist(),
+        "active_state_slots": torch.where(~sample["proprio_dim_is_pad"])[0].tolist(),
         "action_loss_enabled": action_loss_enabled,
         "video_loss_enabled": bool(sample["video_loss_mask"]),
         "video_range": [float(sample["video"].min()), float(sample["video"].max())],
@@ -173,6 +181,16 @@ def main() -> int:
     sys.path.insert(0, str(fastwam_src))
 
     preprocess_root = args.preprocess_root.expanduser().resolve()
+    normalization_stats = (
+        args.normalization_stats.expanduser().resolve()
+        if args.normalization_stats is not None
+        else preprocess_root / "work/stage_pipeline/normalization_stats.json"
+    )
+    if not normalization_stats.is_file():
+        raise FileNotFoundError(
+            "Normalization statistics do not exist. Build train/A/joint statistics first: "
+            f"{normalization_stats}"
+        )
     output = args.output
     if output is None:
         output = preprocess_root / "work/stage_pipeline/validation/all_datasets.json"
@@ -181,7 +199,7 @@ def main() -> int:
     results = []
     for name in args.datasets:
         try:
-            result = _validate_dataset(name, preprocess_root)
+            result = _validate_dataset(name, preprocess_root, normalization_stats)
         except Exception as exc:
             result = {
                 "status": "failed",
@@ -208,6 +226,7 @@ def main() -> int:
             "target_fps": 20.0,
             "memory_history": {"long": 8, "mid": 2, "short": 1},
         },
+        "normalization_stats": str(normalization_stats),
         "datasets": results,
     }
     output.parent.mkdir(parents=True, exist_ok=True)

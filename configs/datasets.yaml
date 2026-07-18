@@ -17,7 +17,7 @@ datasets:
     source_format: lerobot_and_augmented_variants
   agibot_beta:
     root: AgiBot_Beta/AgiBotWorld-Beta
-    source_format: observation_tar
+    source_format: observation_tar_plus_proprio_stats_hdf5
   robocoin:
     root: RoboCOIN
     source_format: lerobot_v2_1

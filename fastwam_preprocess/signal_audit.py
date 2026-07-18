@@ -99,6 +99,7 @@ def _dimension_metrics(
     dimension: int,
     timestamps: list[float],
     extreme_abrupt_multiplier: float,
+    minimum_abrupt_step: float,
 ) -> tuple[dict[str, Any], list[int], list[int], list[int], list[int]]:
     finite = [item for item in values if math.isfinite(item)]
     non_finite_indices = [
@@ -123,6 +124,7 @@ def _dimension_metrics(
     threshold = (
         max(
             1e-6,
+            minimum_abrupt_step,
             median_active_step * 20.0,
             median_active_step + 12.0 * 1.4826 * mad,
         )
@@ -159,6 +161,7 @@ def _dimension_metrics(
         "step_mad": mad,
         "maximum_abs_step": max(steps, default=0.0),
         "abrupt_threshold": threshold,
+        "abrupt_threshold_floor": minimum_abrupt_step,
         "abrupt_step_count": len(abrupt_indices),
         "abrupt_step_ratio": len(abrupt_indices) / max(1, len(values) - 1),
         "abrupt_step_indices_sample": abrupt_indices[:32],
@@ -350,6 +353,7 @@ def analyze_signal(
     quaternion_norm_tolerance: float = 0.05,
     quaternion_max_step_rad: float = 1.5,
     extreme_abrupt_multiplier: float = 10.0,
+    minimum_abrupt_step: float = 0.0,
 ) -> dict[str, Any]:
     rows = vectors(values)
     widths = [len(row) for row in rows]
@@ -399,6 +403,7 @@ def analyze_signal(
             dimension,
             numeric_timestamps,
             extreme_abrupt_multiplier,
+            minimum_abrupt_step,
         )
         if dimension in quaternion_dimensions:
             metrics["semantic_type"] = "quaternion_component"

@@ -108,7 +108,7 @@ python3 scripts/preprocess_robocoin.py pipeline --max-episodes 20 --verify-files
 | Galaxea | Tar-contained LeRobot Parquet/AV1; canonical-active action auditing | Current R1-lite sample is A-tier; validate all embodiments and physical limits |
 | OXE | Restricted tar-contained pickle reader; ASU xyz+rpy conversion | ASU UR5 is A-tier; every other OXE subset remains independently gated |
 | OXE-AugE | One episode per target robot; next replay state as a derived target | A-tier derived action is not a native hardware command; preserve lineage/domain labels |
-| AgiBot-Beta | Observation tar plus automatic `proprio_stats.h5` episode join | Current download has no proprio shards, so the real sample remains video-only |
+| AgiBot-Beta | Observation tar plus indexed `proprio_stats.h5` episode join | Real episode 673828 is A-tier with 20 active slots and 18 action windows; full proprio download is still in progress |
 | RoboMIND | Native HDF5, embedded images, official per-embodiment master/puppet table | Only official contract-table embodiments can enter A-tier |
 | InternData-A1 | Native LeRobot action/state schema and three-camera decode | Current A2D sample is A-tier; separate real/sim normalization domains |
 
@@ -129,8 +129,9 @@ The materializer remains a sidecar stage, while the FastWAM repository now inclu
 normalization per embodiment domain, composes semantic camera slots, and forwards A/B-tier
 sample-level loss masks into FastWAM. The first real RoboCOIN 81/80/21 training and checkpoint
 resume proof is documented in `FASTWAM_TRAINING_INTEGRATION.md`. Preprocessing now produces
-81/80/21 joint cases for six locally available control datasets, but their combined Stage 2
-normalization statistics and optimizer regression must be rebuilt before full training.
+81/80/21 joint cases for all seven currently sampled datasets. The stats builder now discovers
+pipeline manifests and admits only train/A-tier/joint cases; full-dataset statistics and the
+combined Stage 2 optimizer regression must still be rebuilt before production training.
 
 The current training bridge also merges target and 8/2/1 memory frame requests into one decode,
 materializes `tar://` video members into an atomic cache, and exposes dataset IDs to a deterministic
@@ -153,5 +154,6 @@ real 5B/6B training and memory-aware inference results.
 The repository-local design and execution references are
 [`CLEANING_PIPELINE_V2.md`](CLEANING_PIPELINE_V2.md),
 [`ACTION_DATA_ADMISSION.md`](ACTION_DATA_ADMISSION.md),
+[`AGIBOT_PROPRIO_TRAINING.md`](AGIBOT_PROPRIO_TRAINING.md),
 [`DATA_DOWNLOAD.md`](DATA_DOWNLOAD.md), and
 [`THREE_STAGE_FASTWAM_TRAINING.md`](THREE_STAGE_FASTWAM_TRAINING.md).

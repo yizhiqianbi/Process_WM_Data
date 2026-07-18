@@ -34,6 +34,7 @@ class CleaningPolicy:
     quaternion_norm_tolerance: float = 0.05
     quaternion_max_step_rad: float = 1.50
     extreme_abrupt_multiplier: float = 10.0
+    joint_position_abrupt_step_floor_rad: float = 0.01
     sparse_visual_sample_count: int = 9
     sparse_visual_max_cameras: int = 3
     visual_dark_value: int = 10
@@ -92,6 +93,12 @@ def _signal_metrics(
     policy: CleaningPolicy | None = None,
 ) -> dict[str, Any]:
     policy = policy or CleaningPolicy()
+    source_name = str(source_key or "").lower()
+    joint_position_floor = (
+        policy.joint_position_abrupt_step_floor_rad
+        if "joint" in source_name and "position" in source_name
+        else 0.0
+    )
     return analyze_signal(
         values,
         feature=feature,
@@ -103,6 +110,7 @@ def _signal_metrics(
         quaternion_norm_tolerance=policy.quaternion_norm_tolerance,
         quaternion_max_step_rad=policy.quaternion_max_step_rad,
         extreme_abrupt_multiplier=policy.extreme_abrupt_multiplier,
+        minimum_abrupt_step=joint_position_floor,
     )
 
 

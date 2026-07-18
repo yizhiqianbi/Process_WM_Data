@@ -297,7 +297,8 @@ proprio token 会被置零并在 context mask 中关闭。
 
 ## 8. 当前限制与下一步
 
-- 当前真实训练只覆盖 RoboCOIN 两个验证 episode，不等于七个数据集已经全部可训练。
+- 本文记录的 optimizer/checkpoint 基线只覆盖 RoboCOIN 两个验证 episode；AgiBot proprio 的
+  真实 data/memory loader 回归见 `AGIBOT_PROPRIO_TRAINING.md`，尚待 GPU 单步 optimizer 验收。
 - tar 内视频已可正确解码，但压缩 archive 的随机访问成本高；大规模训练应先做本地视频 shard/cache。
 - 当前 production 配置默认关闭 rollout eval，以控制 21 帧扩散采样的成本。canonical evaluator
   已保留维度/时间 mask 并可报告 normalized-space action L1/L2；若需要物理单位指标，还需为每个

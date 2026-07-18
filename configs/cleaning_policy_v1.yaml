@@ -15,6 +15,9 @@ policy:
   quaternion_norm_tolerance: 0.05
   quaternion_max_step_rad: 1.5
   extreme_abrupt_multiplier: 10.0
+  # 0.01 rad/frame suppresses quantization/noise false positives on a nearly
+  # stationary arm; the hard interval threshold remains 10x larger.
+  joint_position_abrupt_step_floor_rad: 0.01
   sparse_visual_sample_count: 9
   sparse_visual_max_cameras: 3
   visual_dark_value: 10

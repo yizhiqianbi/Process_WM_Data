@@ -337,7 +337,7 @@ Tier 只表达能力边界：
 | --- | --- | --- | --- |
 | OXE | pickle 数组和派生列已支持 | pickle 内嵌图像已支持 | ASU UR5 已进入 A；其他子集仍逐项验证 |
 | OXE-AugE | target-robot replay Parquet 已支持 | target robot 本地 MP4 已支持 | next replay state 作为有 provenance 的派生 target；9 个 variant 回归通过 |
-| AgiBot-Beta | observation/proprio tar join 已实现 | tar 内 MP4 已支持，同 tar 合并打开 | 当前下载缺 `proprio_stats`，真实样本仍为 B |
+| AgiBot-Beta | observation/proprio tar join、valid-index 交集已实现 | tar 内 MP4 已支持，视频 member 原子缓存 | 真实 episode 673828 已进入 A，18 个 action window |
 | RoboCOIN | Parquet、signal、alignment 已支持 | 多路 MP4 已支持 | 当前实样可进入 A；需按 embodiment 校准 |
 | RoboMIND | 官方本体表驱动的 HDF5 state/action reader | HDF5 内嵌 JPEG/array 已支持 | 表内本体可进入 A；未知本体保持 B |
 | Galaxea | tar 内 Parquet 和 canonical-active signal audit | tar.gz 内 MP4 已支持 | R1-lite 实样进入 A，24 个 action window |
@@ -360,6 +360,7 @@ Tier 只表达能力边界：
 | `bad_interval_padding_frames` | 1 | 局部区间前后扩张 |
 | `quaternion_norm_tolerance` | 0.05 | quaternion norm 容差 |
 | `quaternion_max_step_rad` | 1.5 | 单步 geodesic soft warning |
+| `joint_position_abrupt_step_floor_rad` | 0.01 | 避免近静止编码器微噪声令 MAD 阈值退化；hard jump 仍使用 10 倍阈值 |
 | `sparse_visual_sample_count` | 9 | 每路相机稀疏样本数 |
 | `sparse_visual_max_cameras` | 3 | 每 episode 默认审计相机数；`<=0` 表示全相机 |
 | `visual_extreme_pixel_ratio` | 0.98 | 极黑/极白像素比例 |
@@ -462,12 +463,13 @@ python3 -m fastwam_preprocess.cli windows \
   6 个与局部 hard interval 相交后只保留 video；其他 OXE 子集没有被错误升级；
 - OXE-AugE：按 target robot 拆分，9/9 variant action-eligible，共 96 个 action window；
 - RoboMIND `h5_ur_1rgb`：按官方 puppet/puppet contract 读取 HDF5，2 个 action window；
-- AgiBot tar 内 `head_color.mp4`：tar member 提取、ffprobe 和稀疏审计通过；因本地缺
-  `proprio_stats`，20 个窗口全部保持 video-only；
+- AgiBot task 389 / episode 673828：真实 observation/proprio/task join 通过；1226 个原始
+  HDF5 行按 action index 交集筛成 1167 行，重采样后得到 786 state、785 transition 和
+  18 个 A 级 action window；
 - Galaxea 实样：四元数分量误报被几何检查消除，从原先 action blocker 恢复为 A；
 - Galaxea 该样本生成 24 个 81-step window；普通 abrupt 只做 soft flag，不错误降级 action window。
 - InternData-A1 A2D：官方 action schema 优先级和零起始关节名修复后，8 个 action window；
-- 六个当前有控制文件的数据集均产出 `81 state / 80 action / 21 video` 联合 case。
+- 七个数据集的当前实样均产出 `81 state / 80 action / 21 video` 联合 case。
 
 自动测试覆盖：
 
@@ -484,13 +486,13 @@ python3 -m fastwam_preprocess.cli windows \
 
 1. 为七个数据集建立全局 fingerprint/near-duplicate index，而不是只在单次 clean 内比较。
 2. 按 embodiment 配置物理单位、joint/workspace/gripper/velocity/acceleration limits。
-3. 完成 OXE 其余子集 action contract；等待 AgiBot 真实 proprio 分片；统计 RoboMIND 未知本体命中率。
+3. 完成 OXE 其余子集 action contract；全量验证 AgiBot 剩余 proprio 分片；统计 RoboMIND 未知本体命中率。
 4. 增加多相机 PTS drift、跨相机同步和视频-control duration drift 的精确检查。
 5. 在人工标定集上评估 VLM success/confidence，再决定是否加入 soft sampling weight。
 6. 为 stage 3 接入 dataset-specific success label 和目标域数据平衡规则。
 
 在这些工作完成前，当前管线适合生成可追溯的 Stage 1 语料和已验证 embodiment 的 Stage 2
-candidate，不应把 OXE 未审核子集、RoboMIND 未知本体或 observation-only AgiBot 自动打开 action loss。
+candidate，不应把 OXE 未审核子集、RoboMIND 未知本体或尚未 join 到 proprio 的 AgiBot observation 自动打开 action loss。
 逐数据集证据、mapping 和 81 帧结果见 `ACTION_DATA_ADMISSION.md`。
 
 ## 15. 验证命令

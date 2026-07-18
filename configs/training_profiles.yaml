@@ -24,8 +24,8 @@ datasets:
     input_family: lerobot_and_lineage_linked_augmentation
     action_gate: verified_canonical_mapping
   agibot_beta:
-    input_family: observation_tar_with_external_parameters
-    action_gate: parameters_join_and_verified_canonical_mapping
+    input_family: observation_tar_with_proprio_stats_hdf5
+    action_gate: proprio_episode_join_and_verified_canonical_mapping
   robocoin:
     input_family: lerobot_v2_1
     action_gate: verified_canonical_mapping_and_alignment

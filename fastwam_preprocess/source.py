@@ -174,8 +174,15 @@ class ParquetSourceReader:
             payload = io.BytesIO(self._member_bytes(archive_path, member_name))
             source = payload
 
+        conversion = (record.get("metadata") or {}).get("native_conversion") or {}
+        valid_index_keys = [str(value) for value in conversion.get("valid_index_keys") or []]
+        valid_index_policy = str(conversion.get("valid_index_policy") or "intersection")
+        if valid_index_policy != "intersection":
+            raise ValueError(f"Unsupported HDF5 valid_index_policy: {valid_index_policy}")
+
         arrays: dict[str, Any] = {}
         row_count: int | None = None
+        valid_index_sets: list[set[int]] = []
         with h5py.File(source, mode="r") as handle:
             for key in source_keys:
                 if key == "frame_index" or key not in handle:
@@ -187,10 +194,27 @@ class ParquetSourceReader:
                 count = int(values.shape[0])
                 row_count = count if row_count is None else min(row_count, count)
                 arrays[key] = values
+            for key in valid_index_keys:
+                if key not in handle:
+                    raise KeyError(f"Configured HDF5 valid index dataset is missing: {key}")
+                values = handle[key][...]
+                if getattr(values, "ndim", 0) != 1:
+                    raise ValueError(f"HDF5 valid index dataset must be 1D: {key}")
+                valid_index_sets.append({int(value) for value in values.tolist()})
         if row_count is None:
             raise ValueError(f"No requested HDF5 signal datasets found in {uri}")
+        if valid_index_sets:
+            selected_indices = sorted(
+                index
+                for index in set.intersection(*valid_index_sets)
+                if 0 <= index < row_count
+            )
+            if not selected_indices:
+                raise ValueError(f"HDF5 valid index intersection is empty in {uri}")
+        else:
+            selected_indices = list(range(row_count))
         arrays = {
-            key: self._python_value(value[:row_count]) for key, value in arrays.items()
+            key: self._python_value(value[selected_indices]) for key, value in arrays.items()
         }
         timestamp_key = str(
             ((record.get("metadata") or {}).get("native_conversion") or {}).get(
@@ -215,8 +239,11 @@ class ParquetSourceReader:
             fps = float(record.get("fps") or 0.0)
             if fps <= 0:
                 raise ValueError("HDF5 native decode requires timestamp_key or source fps")
-            arrays["timestamp"] = [index / fps for index in range(row_count)]
-        arrays["frame_index"] = list(range(row_count))
+            origin = selected_indices[0]
+            arrays["timestamp"] = [
+                (index - origin) / fps for index in selected_indices
+            ]
+        arrays["frame_index"] = selected_indices
         return pa.table(arrays)
 
     @staticmethod

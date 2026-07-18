@@ -83,6 +83,58 @@ class EpisodeSourceReaderTest(unittest.TestCase):
         self.assertEqual(table["timestamp"].to_pylist(), [0.0, 0.1, 0.2])
         self.assertEqual(table["state/joint/position"][2].as_py(), [0.2, 1.2])
 
+    def test_hdf5_reader_applies_intersection_of_native_valid_indices(self):
+        path = self.root / "indexed_proprio_stats.h5"
+        with h5py.File(path, mode="w") as handle:
+            handle.create_dataset(
+                "timestamp",
+                data=[1_000_000_000 + index * 50_000_000 for index in range(6)],
+            )
+            handle.create_dataset(
+                "state/joint/position", data=[[float(index)] for index in range(6)]
+            )
+            handle.create_dataset(
+                "action/joint/position",
+                data=[[float(index + 1)] for index in range(6)],
+            )
+            handle.create_dataset("action/joint/index", data=[1, 2, 3, 4])
+            handle.create_dataset("action/head/index", data=[0, 1, 2, 3, 4])
+        record = {
+            "source_uri": str(path),
+            "fps": 20.0,
+            "metadata": {
+                "native_conversion": {
+                    "source_format": "hdf5",
+                    "timestamp_key": "timestamp",
+                    "valid_index_keys": [
+                        "action/joint/index",
+                        "action/head/index",
+                    ],
+                    "valid_index_policy": "intersection",
+                }
+            },
+        }
+        with ParquetSourceReader() as reader:
+            table = reader.read_record(
+                record,
+                columns=[
+                    "timestamp",
+                    "frame_index",
+                    "state/joint/position",
+                    "action/joint/position",
+                ],
+            )
+        self.assertEqual(table.num_rows, 4)
+        self.assertEqual(table["frame_index"].to_pylist(), [1, 2, 3, 4])
+        self.assertEqual(
+            table["state/joint/position"].to_pylist(),
+            [[1.0], [2.0], [3.0], [4.0]],
+        )
+        for actual, expected in zip(
+            table["timestamp"].to_pylist(), [0.0, 0.05, 0.1, 0.15]
+        ):
+            self.assertAlmostEqual(actual, expected)
+
 
 if __name__ == "__main__":
     unittest.main()
