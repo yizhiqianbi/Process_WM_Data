@@ -11,6 +11,10 @@ Raw downloads are handled by the portable, commit-locked downloader documented i
 [`DATA_DOWNLOAD.md`](DATA_DOWNLOAD.md). It supports all seven datasets, gated access checks,
 parallel resume, local status, and remote file-size verification.
 
+The latest executable acceptance matrix, including the distinction between completed data-path
+validation and pending production/GPU gates, is in
+[`VALIDATION_STATUS.md`](VALIDATION_STATUS.md).
+
 ## Contract
 
 - Control timeline: resampled to 20 Hz; 81 state points and 80 actions cover 4 seconds.
@@ -56,6 +60,37 @@ python3 scripts/run_pipeline.py --datasets all --workers 2 --verify-files
 `--check-videos` performs sparse visual auditing on up to three semantic camera roles per
 episode. Do not enable `--decode-videos` for the first full run: it additionally invokes full
 ffmpeg decode and should be scheduled after the manifest has filtered C-tier data.
+
+### AgiBot proprio path
+
+When AgiBot observations are already present, download only the components required for action
+training, run the 81/80/21 pipeline, and build stats from admitted training windows:
+
+```bash
+python3 scripts/download_agibot_training_assets.py \
+  --data-root "$FASTWAM_DATA_ROOT" \
+  --token-file /secure/path/hf_token.txt \
+  --file-workers 4
+
+python3 scripts/run_pipeline.py \
+  --datasets agibot_beta \
+  --output-root work/stage_pipeline \
+  --num-frames 81 \
+  --target-fps 20 \
+  --verify-files \
+  --check-videos
+
+python3 scripts/build_fastwam_normalization_stats.py \
+  --pipeline-root work/stage_pipeline \
+  --datasets all \
+  --data-root . \
+  --output work/stage_pipeline/normalization_stats.json
+```
+
+The component downloader selects `proprio_stats + task_info` by default. Camera `parameters` are
+optional and do not gate action training. See
+[`AGIBOT_PROPRIO_TRAINING.md`](AGIBOT_PROPRIO_TRAINING.md) for HDF5 indices, units, canonical slots,
+normalization, memory validation, and the Stage 2 smoke command.
 
 ## Stages
 
@@ -155,5 +190,6 @@ The repository-local design and execution references are
 [`CLEANING_PIPELINE_V2.md`](CLEANING_PIPELINE_V2.md),
 [`ACTION_DATA_ADMISSION.md`](ACTION_DATA_ADMISSION.md),
 [`AGIBOT_PROPRIO_TRAINING.md`](AGIBOT_PROPRIO_TRAINING.md),
+[`VALIDATION_STATUS.md`](VALIDATION_STATUS.md),
 [`DATA_DOWNLOAD.md`](DATA_DOWNLOAD.md), and
 [`THREE_STAGE_FASTWAM_TRAINING.md`](THREE_STAGE_FASTWAM_TRAINING.md).

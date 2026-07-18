@@ -36,6 +36,9 @@ memory_video_short     [3, 1, 384, 320]
 camera_present_mask    [true, true, true]
 ```
 
+稳定的仓库级通过/待验矩阵见 `VALIDATION_STATUS.md`。运行中的下载字节数属于机器状态，不写入
+Git；下载完成以 size-verified receipt 的 `status=ok` 为准。
+
 ## 2. 下载边界
 
 已有 observation 视频时，Stage 2 必需的新增组件只有：
@@ -298,3 +301,19 @@ smoke 的验收条件：
 
 原始 tar、canonical Parquet、text cache、视频 cache、训练 checkpoint 和 token 都位于忽略的
 `work/` 或外部数据目录，不进入公开代码仓库。
+
+## 13. 实现与测试索引
+
+| 功能 | 代码位置 |
+|---|---|
+| observation/proprio/task join 和 tar offset 索引 | `fastwam_preprocess/adapters/agibot.py` |
+| HDF5 valid-index 交集和原始 frame index 保留 | `fastwam_preprocess/source.py` |
+| signal、alignment、局部 bad interval 清洗 | `fastwam_preprocess/cleaning.py` |
+| joint micro-noise floor 与 abrupt metrics | `fastwam_preprocess/signal_audit.py` |
+| train/A/joint 窗口支持集 normalization | `scripts/build_fastwam_normalization_stats.py` |
+| commit-locked 组件下载和 size receipt | `scripts/download_agibot_training_assets.py` |
+| FastWAM 三相机、mask 和 causal memory 验收 | `scripts/validate_fastwam_training_cases.py` |
+| adapter/tar join 回归 | `tests/test_agibot.py` |
+| HDF5 index reader 回归 | `tests/test_source.py` |
+| noise floor 和 hard jump 回归 | `tests/test_cleaning.py` |
+| stats 过滤、窗口并集与去重回归 | `tests/test_normalization_stats.py` |
