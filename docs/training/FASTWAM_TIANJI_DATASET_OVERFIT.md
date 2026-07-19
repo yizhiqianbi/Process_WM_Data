@@ -125,6 +125,11 @@ loader 只得到 485 个窗口。真实 validation 已确认当前命令得到 4
 episode-balanced oversampling，因为那会在单个 epoch 中重复短轨迹并漏掉长轨迹的部分窗口；
 当前目标首先是完整覆盖所有采集窗口。
 
+8 卡 DDP 要求每个 rank 的 batch 数相同。486 不能被 8 整除，因此 Accelerate 每个 epoch 将
+全局样本槽位补齐到 488：486 个真实窗口全部各出现一次，再确定性重复 2 个 epoch 首部窗口。
+训练日志必须报告 `per_rank_batches=61`、`global_batch_size=8`。补齐不会漏掉数据，但统计样本
+更新数时必须把这 2 个同步尾部槽位算进去。
+
 ## 5. 跨 episode 固定 probe
 
 生成与 loader 完全相同顺序的 probe 计划：
@@ -148,6 +153,10 @@ python3 scripts/plan_fastwam_dataset_overfit.py \
 `eval_<index>`，suite JSON 报告 8 条轨迹的均值并保留逐 probe 记录。因此 step 0 与后续 step
 可以逐样本比较，不会把不同轨迹的 PSNR 或 action L1 错当成同一曲线。
 
+在 8 卡任务中，probe position `0..7` 分别交给 rank `0..7`。各 rank 只生成自己的一个 probe，
+随后通过 `all_gather_object` 合并为 rank-0 suite；最终必须恰好有 8 个 pair 和 1 个 suite，不能
+让每个 rank 重复推理全部 8 个样本。
+
 ## 6. 训练配置
 
 `configs/tuning/take_wrong_item.example.yaml` 中的 `dataset_overfit` 默认：
@@ -155,21 +164,26 @@ python3 scripts/plan_fastwam_dataset_overfit.py \
 | 配置 | 值 |
 |---|---:|
 | initialization | Stage-2 MemoryFastWAM checkpoint |
-| batch / accumulation | 1 / 1 |
+| GPUs / world size | `0..7` / 8 |
+| per-rank batch / accumulation | 1 / 1 |
+| global batch | 8 |
 | backbone LR | `2e-5` |
 | memory/reference LR | `1e-4` |
 | video/action lambda | 1 / 1 |
 | weight decay | 0 |
 | scheduler | 5% linear warmup, then constant |
 | sampler | uniform, 486 samples/epoch |
-| workers | 2 |
-| checkpoint interval | 500 steps |
-| 8-probe eval interval | 2,000 steps + step 0 |
+| workers | 2 per rank |
+| global optimizer steps | 1,250 |
+| checkpoint interval | 250 global steps |
+| 8-probe eval interval | 250 global steps + step 0 |
 | inference steps / seed | 10 / 42 |
 
-10,000 optimizer steps 约等于 20.6 个 dataset epochs。前 500 steps 将 LR 从接近 0 线性升到
-配置值，之后保持 constant。先做 1 到 2 step smoke，再根据 2,000、
-4,000 step 的 8-probe 曲线决定是否跑满 10,000；不能只看某一条 episode 的最好视频。
+本实验的预算单位是样本更新，不是单卡 step：`1,250 global steps * 8 = 10,000` 个样本槽位，
+等价于原计划单卡 10,000 step 的训练量，而不是把训练量放大 8 倍。每个同步 epoch 有 61 个
+global batches，因此共约 20.5 个 epoch。前 `floor(1,250 * 5%) = 62` steps 线性 warmup，之后
+保持 constant。收敛判断使用 step 250、500、750、1,000、1,250 的同一 8-probe suite，不能
+只看某一条 episode 的最好视频。
 
 ## 7. 启动顺序
 
@@ -181,8 +195,8 @@ python3 scripts/tune_models.py dry-run \
   --model fastwam \
   --phase dataset_overfit \
   --output-dir work/tuning/runs/fastwam_tianji_dataset_overfit \
-  --steps 10000 \
-  --gpus 0
+  --steps 1250 \
+  --gpus 0,1,2,3,4,5,6,7
 ```
 
 必须看到：
@@ -193,6 +207,8 @@ data.train.max_samples=null
 data.train.split=[train,validation]
 data.train.allowed_modes=[joint_video_action,video_only]
 ++eval_fixed_indices=[5,87,180,239,318,377,441,480]
+++expected_world_size=8
+--nproc_per_node=8
 ```
 
 同时必须确认命令中**没有** `camera_rectification_config`。
@@ -204,9 +220,9 @@ python3 scripts/tune_models.py run \
   --config work/tuning/take_wrong_item.local.yaml \
   --model fastwam \
   --phase dataset_overfit \
-  --output-dir work/tuning/runs/fastwam_tianji_dataset_overfit_raw_smoke \
+  --output-dir work/tuning/runs/fastwam_tianji_dataset_overfit_8gpu_smoke_retry \
   --steps 2 \
-  --gpus 0
+  --gpus 0,1,2,3,4,5,6,7
 ```
 
 smoke 通过后再启动正式训练：
@@ -217,8 +233,8 @@ python3 scripts/tune_models.py run \
   --model fastwam \
   --phase dataset_overfit \
   --output-dir work/tuning/runs/fastwam_tianji_dataset_overfit \
-  --steps 10000 \
-  --gpus 0
+  --steps 1250 \
+  --gpus 0,1,2,3,4,5,6,7
 ```
 
 ## 8. 视频与动作产物
@@ -270,14 +286,20 @@ python3 scripts/tune_models.py run \
 
 ## 10. 真实 smoke 结果
 
-2026-07-19 在单张 H200 上完成 raw-fisheye 2-step 真实 smoke，launcher 状态为 `succeeded`，
-耗时 121.6 秒（包含模型加载和 step-0 的 8-probe diffusion suite）。训练进程实际报告：
+2026-07-19 在 8 张 H200 上完成 raw-fisheye 2-step 真实 DDP smoke，launcher 状态为
+`succeeded`，耗时 112.4 秒（包含 8 个模型进程加载和 step-0 的 8-probe diffusion suite）。
+训练进程实际报告：
 
 ```text
 cases=127
 windows=486
 samples_per_epoch=486
 train/val dataset size=486/486
+world_size=8
+per_rank_batches=61
+global_batch_size=8
+first global batch sample indices=[384,88,66,484,204,328,226,85]
+parameter synchronization max_difference=0.000e+00
 camera rectification mask=[false,false,false]
 camera rectification config=null
 memory_valid_ratio=1.0
@@ -293,16 +315,19 @@ Stage-2 初始化的 8-probe step-0 均值为：
 | action L1 | 0.35885 |
 | action MSE | 0.25942 |
 
-8 条 probe 全部生成三联诊断、imagination、execution、pair、action 和组合视频。主 pair 已通过
-容器与像素检查：H.264、640x416、5 FPS、21 帧、4.2 秒；左侧是 imagination，右侧是同一窗口
-GT。带 action 的组合视频仍为 640x640。smoke 最终写出 `step_000002.pt`，证明 raw-fisheye
-full-dataset loader、backward、optimizer 和 pair 编码链路均可执行。
+8 条 probe 由 rank 0..7 各执行一条，全部生成三联诊断、imagination、execution、pair、action
+和组合视频，并只合并出一个包含 8 条记录的 suite。主 pair 已通过容器与像素检查：H.264、
+640x416、5 FPS、21 帧、4.2 秒；左侧是 imagination，右侧是同一窗口 GT。带 action 的组合
+视频仍为 640x640。smoke 最终写出 12 GB 的 `step_000002.pt`；首批数据分片无重复，step 1 后
+跨 rank 参数探针最大差异为零，证明真实 DDP backward、梯度同步、optimizer 和 pair 编码链路
+均可执行。
 
-正式 10,000-step run 输出目录为：
+正式 1,250-global-step / 10,000-sample-slot run 输出目录为：
 
 ```text
 work/tuning/runs/fastwam_tianji_dataset_overfit
 ```
 
-smoke 结果只建立 step-0 基线和可执行性，不计作收敛证据。正式结果必须在同一 8-probe suite
-上比较 step 2,000、4,000、6,000、8,000、10,000。
+启动日志为 `work/tuning/launch_logs/fastwam_tianji_dataset_overfit_8gpu_1250.log`。smoke 结果只
+建立 step-0 基线和可执行性，不计作收敛证据。正式结果必须在同一 8-probe suite 上比较 step
+250、500、750、1,000、1,250。

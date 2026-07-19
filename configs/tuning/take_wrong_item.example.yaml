@@ -12,7 +12,7 @@ models:
     diffsynth_model_base: "${FASTWAM_DIFFSYNTH_MODEL_BASE}"
     stage1_video_checkpoint: "${FASTWAM_STAGE1_VIDEO_CKPT}"
     action_dit_checkpoint: "${FASTWAM_ACTION_DIT_CKPT}"
-    gpus: "0"
+    gpus: "0,1,2,3,4,5,6,7"
     phases:
       stage1_video:
         task: stage1_video_backbone_smoke
@@ -88,9 +88,9 @@ models:
         sampling_strategy: uniform
         num_workers: 2
         log_every: 10
-        save_every: 500
+        save_every: 250
         save_training_state: false
-        eval_every: 2000
+        eval_every: 250
         eval_num_inference_steps: 10
         eval_seed: 42
         eval_fixed_indices: [5, 87, 180, 239, 318, 377, 441, 480]
@@ -106,6 +106,9 @@ models:
     gpus: "1"
     num_gpus: 1
     workers: 0
+    batch_size: 1
+    window_frames: 0
+    samples_per_episode: 1
     save_interval: 1
     gradient_accumulation_steps: 1
     allow_partial_latents: false
@@ -121,8 +124,14 @@ models:
     vae: "${DREAMZERO_VAE}"
     tokenizer_root: "${DREAMZERO_TOKENIZER_ROOT}"
     pretrained_model_root: "${DREAMZERO_PRETRAINED_MODEL_ROOT}"
-    gpus: "2"
-    num_gpus: 1
+    gpus: "0,1,2,3,4,5,6,7"
+    num_gpus: 8
+    batch_size: 1
+    global_batch_size: 8
+    save_interval: 125
+    save_total_limit: 5
+    workers: 0
     learning_rate: 1.0e-5
+    warmup_ratio: 0.05
     image_width: 320
     image_height: 176

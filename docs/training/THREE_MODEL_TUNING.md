@@ -16,7 +16,7 @@ normalization：
 | 模型 | Target | 时间合同 | Action 合同 |
 |---|---|---|---|
 | Memory FastWAM | `TrainingCaseV1` | 20 Hz，81 state / 80 action / 21 video | canonical 80D + valid mask |
-| old `Robbyant/lingbot-va` | LeRobot v2 + latent | 源 28 Hz，latent 7 Hz | compact 8D 映射到模型 30D channel |
+| old `Robbyant/lingbot-va` | LeRobot v2 + latent | 源 28 Hz，VAE 输入 7 Hz，latent 1.75 Hz | compact 8D 映射到模型 30D channel |
 | DreamZero | GEAR LeRobot + Hydra profile | 28 Hz，33 video / 24 action | XDOF right joint 7D + gripper 1D |
 
 代码布局：
@@ -188,27 +188,42 @@ scheduler、sampler 和 RNG。
 ```bash
 python3 scripts/tune_models.py run --config "$CFG" \
   --model lingbot_va --phase finetune \
-  --output-dir work/tuning/runs/lingbot_va --steps 1 --gpus 1
+  --output-dir work/tuning/runs/lingbot_va --steps 250 \
+  --gpus 0,1,2,3,4,5,6,7
 ```
 
 wrapper 处理三个上游问题：缺少 `flash_attn` 时用 PyTorch SDPA 提供 import-compatible fallback；
 单 target 直接使用官方 `LatentLeRobotDataset`，避免模型/NCCL 初始化后 fork 固定 128 个进程；
 checkpoint 补存 optimizer、scheduler 和 step。
 
+整条 episode 长度不同，`batch_size>1` 时必须启用同步固定窗口。当前 8 卡 H200 全量 overfit
+配置为 `batch_size=24/GPU`、`window_frames=16`、`samples_per_episode=48`，global batch 为 192；
+44 条 episode 组成 2,112 个虚拟窗口样本，每 rank 264 个样本，恰好 11 个整 batch。窗口起点
+在每次读取时重新随机采样，video latent、action 和 mask 使用同一裁剪区间。
+
 ### 5.3 DreamZero
 
 ```bash
 python3 scripts/tune_models.py run --config "$CFG" \
   --model dreamzero --phase finetune \
-  --output-dir work/tuning/runs/dreamzero --steps 1 --gpus 2
+  --output-dir work/tuning/runs/dreamzero --steps 500 \
+  --gpus 0,1,2,3,4,5,6,7
 ```
 
-当前为 LoRA 微调，`ATTENTION_BACKEND=torch`，单卡不启用 DeepSpeed。首次运行会加载 10 个
-DreamZero shard，并编译部分算子；这是启动成本，不是数据卡死。
+当前全量 overfit 配置为 8 卡、`batch_size=1/GPU`、global batch 8、500 steps，保存点为
+125/250/375/500。DreamZero 的每卡完整模型常驻约 85.6 GB，首个 forward 后峰值约 118.7 GB，
+因此 H200 上不把 per-GPU batch 提到 2。`ATTENTION_BACKEND=torch` 且不启用 DeepSpeed。
+首次运行会加载 10 个 DreamZero shard、缓存数据并编译部分算子；这是冷启动成本，不是数据卡死。
 
 上游 `BaseExperiment` 在 Trainer 已按 `save_lora_only=true` 写完 step checkpoint 后，仍会调用
 generic saver 导出完整 16.5B 模型。统一 wrapper 跳过这份重复的最终全模型；可恢复的 LoRA、
 optimizer、scheduler、RNG 和 trainer state 均保留在 `checkpoint-N/`。
+
+训练完成后的 8-case GT-observation Pair 推理默认生成 913 帧/case；这是当前最长 8 条合格
+episode 的最大统一 `1 + 8k` horizon，81 帧只保留为最低协议门槛。正式 step-500 推理已完成
+8×913 帧和 7304 帧 reel，33 个 MP4 共 36,520 帧实际解码通过。长序列通过 24-chunk 有界
+KV/VAE context 分段执行，见
+[DreamZero Target](../targets/DREAMZERO.md#gt-observation-pair-推理)。
 
 DreamZero 最小环境除官方核心依赖外还需要：
 

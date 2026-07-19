@@ -25,6 +25,355 @@ index eb1f788..973f970 100644
  
  # training
  gradient_accumulation_steps: 1
+diff --git a/experiments/robotwin/fastwam_policy/deploy_policy.py b/experiments/robotwin/fastwam_policy/deploy_policy.py
+index 3b7f9a2..176c6b3 100644
+--- a/experiments/robotwin/fastwam_policy/deploy_policy.py
++++ b/experiments/robotwin/fastwam_policy/deploy_policy.py
+@@ -3,17 +3,18 @@ import os
+ import sys
+ import time
+ import inspect
++import json
+ from collections import deque
+ from pathlib import Path
+ from typing import Any, Dict, Optional
+ 
+ import numpy as np
+ import torch
++import torchvision.transforms.functional as transforms_F
+ from hydra import compose, initialize_config_dir
+ from hydra.core.global_hydra import GlobalHydra
+ from hydra.utils import instantiate
+ from omegaconf import DictConfig, OmegaConf
+-from PIL import Image
+ 
+ PROJECT_ROOT = Path(__file__).resolve().parents[3]
+ SRC_ROOT = PROJECT_ROOT / "src"
+@@ -26,6 +27,13 @@ if str(SRC_ROOT) not in sys.path:
+ from fastwam.datasets.lerobot.processors.fastwam_processor import FastWAMProcessor
+ from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
+ from fastwam.datasets.lerobot.utils.normalizer import load_dataset_stats_from_json
++from fastwam.datasets.rmbench_memory_dataset import (
++    CANONICAL_DIM,
++    NORMALIZATION_SCHEMA_VERSION,
++    canonical_to_rmbench,
++    canonical_valid_mask,
++    rmbench_to_canonical,
++)
+ 
+ logger = logging.getLogger(__name__)
+ 
+@@ -130,18 +138,84 @@ def _resolve_dataset_stats_path(dataset_stats_path: Optional[str]) -> Path:
+ 
+ 
+ def _resize_rgb(image: np.ndarray, size_wh: tuple[int, int]) -> np.ndarray:
+-    pil_image = Image.fromarray(image.astype(np.uint8), mode="RGB")
+-    resized = pil_image.resize(size_wh, resample=Image.BILINEAR)
+-    return np.asarray(resized, dtype=np.uint8)
++    width, height = size_wh
++    writable = np.array(image, dtype=np.uint8, order="C", copy=True)
++    tensor = torch.from_numpy(writable).permute(2, 0, 1)
++    resized = transforms_F.resize(
++        tensor,
++        size=[height, width],
++        interpolation=transforms_F.InterpolationMode.BILINEAR,
++        antialias=True,
++    )
++    return resized.permute(1, 2, 0).numpy()
++
++
++class RMBenchCanonicalNormalizer:
++    def __init__(self, path: Path, task_name: str) -> None:
++        with path.open("r", encoding="utf-8") as handle:
++            payload = json.load(handle)
++        if payload.get("schema_version") != NORMALIZATION_SCHEMA_VERSION:
++            raise ValueError(
++                f"Unsupported canonical normalization schema in {path}: "
++                f"{payload.get('schema_version')!r}"
++            )
++        matches = [
++            domain
++            for domain, stats in payload.get("domains", {}).items()
++            if stats.get("task_name") == task_name
++            or str(domain).startswith(f"rmbench:{task_name}:")
++        ]
++        if len(matches) != 1:
++            raise ValueError(
++                f"Expected one canonical normalization domain for task={task_name}, got {matches}."
++            )
++        self.domain = matches[0]
++        self.stats = payload["domains"][self.domain]
++        expected_valid = canonical_valid_mask()
++        for kind in ("state", "action"):
++            values = self.stats.get(kind) or {}
++            mean = np.asarray(values.get("mean"), dtype=np.float32)
++            std = np.asarray(values.get("std"), dtype=np.float32)
++            valid = np.asarray(values.get("valid_mask"), dtype=np.bool_)
++            if mean.shape != (CANONICAL_DIM,) or std.shape != (CANONICAL_DIM,):
++                raise ValueError(f"Malformed {kind} stats for canonical domain {self.domain}.")
++            if valid.shape != (CANONICAL_DIM,) or not np.array_equal(valid, expected_valid):
++                raise ValueError(f"Unexpected active slots in {kind} stats for {self.domain}.")
++            if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std <= 0).any():
++                raise ValueError(f"Invalid {kind} mean/std for canonical domain {self.domain}.")
++
++    def normalize_state(self, state: np.ndarray) -> torch.Tensor:
++        canonical = rmbench_to_canonical(np.asarray(state, dtype=np.float32))
++        stats = self.stats["state"]
++        mean = np.asarray(stats["mean"], dtype=np.float32)
++        std = np.asarray(stats["std"], dtype=np.float32)
++        normalized = (canonical - mean) / std
++        normalized = np.clip(normalized, -10.0, 10.0)
++        normalized[~canonical_valid_mask()] = 0.0
++        return torch.from_numpy(normalized).unsqueeze(0)
++
++    def denormalize_action(self, action: torch.Tensor) -> np.ndarray:
++        values = action.detach().to(dtype=torch.float32, device="cpu").numpy()
++        stats = self.stats["action"]
++        mean = np.asarray(stats["mean"], dtype=np.float32)
++        std = np.asarray(stats["std"], dtype=np.float32)
++        canonical = values * std + mean
++        return canonical_to_rmbench(canonical)
++
++    @property
++    def action_dim_is_pad(self) -> torch.Tensor:
++        return torch.from_numpy(~canonical_valid_mask()).unsqueeze(0)
+ 
+ 
+ class WorldActionRobotWinPolicy:
+     def __init__(
+         self,
+         model_cfg: DictConfig,
+-        processor_cfg: DictConfig,
++        processor_cfg: Optional[DictConfig],
+         checkpoint_path: str,
+         dataset_stats_path: Path,
++        task_name: str,
++        canonical_rmbench: bool,
+         device: str,
+         model_dtype: torch.dtype,
+         action_horizon: int,
+@@ -163,9 +237,19 @@ class WorldActionRobotWinPolicy:
+         self.model.load_checkpoint(checkpoint_path)
+         self.model = self.model.to(device).eval()
+ 
+-        self.processor: FastWAMProcessor = instantiate(processor_cfg).eval()
+-        dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
+-        self.processor.set_normalizer_from_stats(dataset_stats)
++        self.canonical_rmbench = bool(canonical_rmbench)
++        self.canonical_normalizer: Optional[RMBenchCanonicalNormalizer] = None
++        self.processor: Optional[FastWAMProcessor] = None
++        if self.canonical_rmbench:
++            self.canonical_normalizer = RMBenchCanonicalNormalizer(
++                dataset_stats_path, task_name=task_name
++            )
++        else:
++            if processor_cfg is None:
++                raise ValueError("processor config is required for non-canonical FastWAM eval.")
++            self.processor = instantiate(processor_cfg).eval()
++            dataset_stats = load_dataset_stats_from_json(str(dataset_stats_path))
++            self.processor.set_normalizer_from_stats(dataset_stats)
+ 
+         self.action_horizon = int(action_horizon)
+         self.replan_steps = int(max(1, min(replan_steps, action_horizon)))
+@@ -180,19 +264,29 @@ class WorldActionRobotWinPolicy:
+         self._num_video_frames = int(num_video_frames)
+ 
+         self.pending_actions: deque[np.ndarray] = deque()
++        self.observation_history: deque[torch.Tensor] = deque(maxlen=11)
++        infer_signature = inspect.signature(self.model.infer_action)
++        self._supports_memory_video = "memory_video" in infer_signature.parameters
++        self._supports_action_dim_mask = "action_dim_is_pad" in infer_signature.parameters
+         self.episode_count = 0
+         self.step_count = 0
+         self._timing_rollout = {"infer_s": 0.0, "sim_s": 0.0}
+ 
+         logger.info(
+-            "Initialized WorldActionRobotWinPolicy | ckpt=%s | stats=%s | horizon=%d | replan=%d",
++            "Initialized WorldActionRobotWinPolicy | ckpt=%s | stats=%s | horizon=%d | "
++            "replan=%d | canonical_rmbench=%s | memory=%s",
+             checkpoint_path,
+             dataset_stats_path,
+             self.action_horizon,
+             self.replan_steps,
++            self.canonical_rmbench,
++            self._supports_memory_video,
+         )
+ 
+     def _normalize_state(self, state: np.ndarray) -> torch.Tensor:
++        if self.canonical_normalizer is not None:
++            return self.canonical_normalizer.normalize_state(state)
++        assert self.processor is not None
+         state_meta = self.processor.shape_meta["state"]
+         if len(state_meta) != 1:
+             raise ValueError("Expected exactly one merged state key in shape_meta['state'].")
+@@ -209,6 +303,10 @@ class WorldActionRobotWinPolicy:
+         if action.ndim != 3:
+             raise ValueError(f"Expected action tensor [B,T,D], got {tuple(action.shape)}")
+ 
++        if self.canonical_normalizer is not None:
++            return self.canonical_normalizer.denormalize_action(action)
++
++        assert self.processor is not None
+         action_meta = self.processor.shape_meta["action"]
+         if len(action_meta) != 1:
+             raise ValueError("Expected exactly one merged action key in shape_meta['action'].")
+@@ -233,6 +331,12 @@ class WorldActionRobotWinPolicy:
+         image_tensor = image_tensor * (2.0 / 255.0) - 1.0
+         return image_tensor
+ 
++    def _record_observation_tensor(self, image_tensor: torch.Tensor) -> None:
++        self.observation_history.append(image_tensor.detach())
++
++    def _record_observation(self, observation: Dict[str, Any]) -> None:
++        self._record_observation_tensor(self._build_robotwin_image_tensor(observation))
++
+     def _infer_action_chunk(self, observation: Dict[str, Any], instruction: str) -> np.ndarray:
+         image_tensor = self._build_robotwin_image_tensor(observation)
+         state_vector = np.asarray(observation["joint_action"]["vector"], dtype=np.float32)
+@@ -252,6 +356,11 @@ class WorldActionRobotWinPolicy:
+             "rand_device": self.rand_device,
+             "tiled": self.tiled,
+         }
++        if self._supports_memory_video:
++            closed_loop_history = [*self.observation_history, image_tensor]
++            infer_kwargs["memory_video"] = torch.stack(closed_loop_history, dim=2)
++        if self._supports_action_dim_mask and self.canonical_normalizer is not None:
++            infer_kwargs["action_dim_is_pad"] = self.canonical_normalizer.action_dim_is_pad
+         if "num_video_frames" in inspect.signature(self.model.infer_action).parameters:
+             infer_kwargs["num_video_frames"] = int(self._num_video_frames)
+         infer_t0 = time.perf_counter() if self.timing_enabled else 0.0
+@@ -262,6 +371,7 @@ class WorldActionRobotWinPolicy:
+ 
+         action_tensor = pred["action"]  # [T, D]
+         action_chunk = self._denormalize_action(action_tensor)[0]  # [T, D]
++        self._record_observation_tensor(image_tensor)
+         return action_chunk
+ 
+     def _fill_action_queue(self, observation: Dict[str, Any], instruction: str) -> None:
+@@ -274,6 +384,7 @@ class WorldActionRobotWinPolicy:
+         return not self.pending_actions
+ 
+     def step(self, task_env, observation: Optional[Dict[str, Any]]) -> None:
++        replanned = False
+         if not self.pending_actions:
+             if observation is None:
+                 raise ValueError(
+@@ -282,6 +393,10 @@ class WorldActionRobotWinPolicy:
+                 )
+             instruction = task_env.get_instruction()
+             self._fill_action_queue(observation=observation, instruction=instruction)
++            replanned = True
++
++        if not replanned and observation is not None:
++            self._record_observation(observation)
+ 
+         if not self.pending_actions:
+             logger.warning("No action generated; skip current eval step.")
+@@ -294,6 +409,23 @@ class WorldActionRobotWinPolicy:
+             self._timing_rollout["sim_s"] += time.perf_counter() - sim_t0
+         self.step_count += 1
+ 
++    def get_action(self, observation: Dict[str, Any]) -> np.ndarray:
++        if observation is None:
++            raise ValueError("get_action requires an RMBench observation payload.")
++        instruction = str(observation.get("_fastwam_instruction") or "").strip()
++        if not instruction:
++            raise ValueError("RMBench server payload is missing `_fastwam_instruction`.")
++        action_chunk = self._infer_action_chunk(observation, instruction)
++        return np.asarray(action_chunk[: self.replan_steps], dtype=np.float32)
++
++    def update_obs(self, observation: Dict[str, Any]) -> None:
++        if observation is None:
++            raise ValueError("update_obs requires an RMBench observation payload.")
++        self._record_observation(observation)
++
++    def reset_model(self) -> None:
++        self.reset()
++
+     def reset_timing_rollout(self) -> None:
+         self._timing_rollout["infer_s"] = 0.0
+         self._timing_rollout["sim_s"] = 0.0
+@@ -306,6 +438,7 @@ class WorldActionRobotWinPolicy:
+ 
+     def reset(self) -> None:
+         self.pending_actions.clear()
++        self.observation_history.clear()
+         self.episode_count += 1
+         self.step_count = 0
+         self.reset_timing_rollout()
+@@ -338,8 +471,21 @@ def get_model(usr_args: Dict[str, Any]):
+     model_dtype = _mixed_precision_to_model_dtype(mixed_precision)
+ 
+     dataset_stats_path = _resolve_dataset_stats_path(
+-        dataset_stats_path=usr_args.get("dataset_stats_path"),
++        dataset_stats_path=(
++            usr_args.get("dataset_stats_path")
++            or cfg.EVALUATION.get("normalization_stats")
++        ),
+     )
++    task_name = str(
++        usr_args.get("task_name") or cfg.EVALUATION.get("task_name") or ""
++    ).strip()
++    canonical_rmbench = _parse_bool(
++        usr_args.get(
++            "canonical_rmbench", cfg.EVALUATION.get("canonical_rmbench", False)
++        )
++    )
++    if canonical_rmbench and not task_name:
++        raise ValueError("task_name is required for canonical RMBench normalization.")
+ 
+     action_horizon = _parse_optional_int(usr_args.get("action_horizon"))
+     if action_horizon is None:
+@@ -371,9 +517,11 @@ def get_model(usr_args: Dict[str, Any]):
+ 
+     policy = WorldActionRobotWinPolicy(
+         model_cfg=cfg.model,
+-        processor_cfg=cfg.data.train.processor,
++        processor_cfg=cfg.data.train.get("processor"),
+         checkpoint_path=str(checkpoint_path),
+         dataset_stats_path=dataset_stats_path,
++        task_name=task_name,
++        canonical_rmbench=canonical_rmbench,
+         device=device,
+         model_dtype=model_dtype,
+         action_horizon=action_horizon,
+@@ -392,6 +540,24 @@ def get_model(usr_args: Dict[str, Any]):
+ 
+ 
+ def eval(TASK_ENV, model, observation: Optional[Dict[str, Any]]):
++    if hasattr(model, "call"):
++        if observation is None:
++            raise ValueError("RMBench client evaluation requires an observation.")
++        instruction = TASK_ENV.get_instruction()
++        payload = dict(observation)
++        payload["_fastwam_instruction"] = instruction
++        actions = np.asarray(
++            model.call(func_name="get_action", obs=payload), dtype=np.float32
++        )
++        for action_index, action in enumerate(actions):
++            TASK_ENV.take_action(action, action_type="qpos")
++            if TASK_ENV.eval_success:
++                break
++            if action_index + 1 < len(actions):
++                follow_up = dict(TASK_ENV.get_obs())
++                follow_up["_fastwam_instruction"] = instruction
++                model.call(func_name="update_obs", obs=follow_up)
++        return
+     obs = encode_obs(observation)
+     model.step(TASK_ENV, obs)
+ 
+diff --git a/experiments/robotwin/fastwam_policy/deploy_policy.yml b/experiments/robotwin/fastwam_policy/deploy_policy.yml
+index c7992f5..f234e7e 100644
+--- a/experiments/robotwin/fastwam_policy/deploy_policy.yml
++++ b/experiments/robotwin/fastwam_policy/deploy_policy.yml
+@@ -14,6 +14,7 @@ sim_cfg_name: sim_robotwin.yaml
+ mixed_precision: bf16
+ device: cuda
+ dataset_stats_path: null
++canonical_rmbench: false
+ action_horizon: null
+ replan_steps: 8
+ num_inference_steps: 10
 diff --git a/pyproject.toml b/pyproject.toml
 index 22ed494..d2d73db 100644
 --- a/pyproject.toml
@@ -957,7 +1306,7 @@ index 0a7f5a6..bcfdf9a 100644
              "loss_video": float(loss_total.detach().item()),
          }
 diff --git a/src/fastwam/runtime.py b/src/fastwam/runtime.py
-index bb8ae13..d08ffe4 100644
+index bb8ae13..672eb61 100644
 --- a/src/fastwam/runtime.py
 +++ b/src/fastwam/runtime.py
 @@ -45,6 +45,7 @@ def create_wan22_model(
@@ -1068,8 +1417,33 @@ index bb8ae13..d08ffe4 100644
          video_train_shift=float(video_scheduler.get("train_shift", 5.0)),
          video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
          video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
+@@ -357,14 +435,20 @@ def _resolve_train_device() -> str:
+ 
+ 
+ def run_training(cfg: DictConfig):
++    process_rank = int(os.environ.get("RANK", "0"))
+     setup_logging(
+         log_level=logging.INFO,
+-        is_main_process=torch.distributed.get_rank() == 0 if torch.distributed.is_initialized() else True,
++        is_main_process=(
++            torch.distributed.get_rank() == 0
++            if torch.distributed.is_initialized()
++            else process_rank == 0
++        ),
+     )
+     misc.register_work_dir(cfg.output_dir)
+-    config_payload = OmegaConf.to_container(cfg, resolve=True)
+-    with open(Path(cfg.output_dir) / "config.yaml", "w") as f:
+-        OmegaConf.save(config_payload, f)
++    if process_rank == 0:
++        config_payload = OmegaConf.to_container(cfg, resolve=True)
++        with open(Path(cfg.output_dir) / "config.yaml", "w") as f:
++            OmegaConf.save(config_payload, f)
+ 
+     model_device = _resolve_train_device()
+     mixed_precision = _normalize_mixed_precision(cfg.mixed_precision)
 diff --git a/src/fastwam/trainer.py b/src/fastwam/trainer.py
-index 75e0f2e..bee37c6 100644
+index 75e0f2e..fd1c28a 100644
 --- a/src/fastwam/trainer.py
 +++ b/src/fastwam/trainer.py
 @@ -11,7 +11,7 @@ import numpy as np
@@ -1152,9 +1526,19 @@ index 75e0f2e..bee37c6 100644
          self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
          self.max_grad_norm = float(cfg.max_grad_norm)
          self.seed = int(cfg.seed)
-@@ -62,10 +104,16 @@ class Wan22Trainer:
+@@ -61,11 +103,26 @@ class Wan22Trainer:
+             mixed_precision=self.mixed_precision,
              step_scheduler_with_optimizer=False,
          )
++        self.expected_world_size = int(cfg.get("expected_world_size", 1))
++        if self.expected_world_size <= 0:
++            raise ValueError("expected_world_size must be positive.")
++        if self.accelerator.num_processes != self.expected_world_size:
++            raise RuntimeError(
++                "Distributed launch mismatch: "
++                f"expected_world_size={self.expected_world_size}, "
++                f"actual_world_size={self.accelerator.num_processes}."
++            )
          
 +        deepspeed_plugin = self.accelerator.state.deepspeed_plugin
 +        zero_stage = "disabled"
@@ -1170,7 +1554,7 @@ index 75e0f2e..bee37c6 100644
              self.accelerator.num_processes,
              self.accelerator.process_index,
              self.mixed_precision,
-@@ -81,11 +129,23 @@ class Wan22Trainer:
+@@ -81,11 +138,23 @@ class Wan22Trainer:
  
          # Freeze non-trainable modules before optimizer/deepspeed initialization.
          # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
@@ -1199,7 +1583,23 @@ index 75e0f2e..bee37c6 100644
          self.optimizer = torch.optim.AdamW(
              trainable_params,
              lr=self.learning_rate,
-@@ -170,6 +230,12 @@ class Wan22Trainer:
+@@ -120,6 +189,15 @@ class Wan22Trainer:
+         self.model, self.optimizer, self.train_loader, self.scheduler = self.accelerator.prepare(
+             self.model, self.optimizer, self.train_loader, self.scheduler
+         )
++        logger.info(
++            "Prepared train loader: world_size=%d per_rank_batches=%d "
++            "global_batch_size=%d",
++            self.accelerator.num_processes,
++            len(self.train_loader),
++            self.batch_size
++            * self.gradient_accumulation_steps
++            * self.accelerator.num_processes,
++        )
+         self.optimizer.zero_grad(set_to_none=True)
+         self.wandb_run = None
+         self._init_wandb()
+@@ -170,6 +248,12 @@ class Wan22Trainer:
              seed=self.seed,
              batch_size=self.batch_size,
              num_processes=self.accelerator.num_processes,
@@ -1212,7 +1612,7 @@ index 75e0f2e..bee37c6 100644
          )
          return DataLoader(
              dataset,
-@@ -210,7 +276,7 @@ class Wan22Trainer:
+@@ -210,7 +294,7 @@ class Wan22Trainer:
  
          num_processes = max(int(self.accelerator.num_processes), 1)
          global_batch_size = max(self.batch_size * num_processes, 1)
@@ -1221,7 +1621,7 @@ index 75e0f2e..bee37c6 100644
          opt_steps_per_epoch = max(
              ceil(micro_steps_per_epoch / self.gradient_accumulation_steps),
              1,
-@@ -275,12 +341,23 @@ class Wan22Trainer:
+@@ -275,12 +359,23 @@ class Wan22Trainer:
              raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
          logger.info("Loading weight checkpoint only: %s", resume)
          self.accelerator.unwrap_model(self.model).load_checkpoint(str(resume_path), optimizer=None)
@@ -1248,7 +1648,7 @@ index 75e0f2e..bee37c6 100644
          self._apply_dit_only_train_mode(model)
  
      @staticmethod
-@@ -294,6 +371,48 @@ class Wan22Trainer:
+@@ -294,6 +389,48 @@ class Wan22Trainer:
              proprio_encoder.train()
              proprio_encoder.requires_grad_(True)
  
@@ -1297,7 +1697,7 @@ index 75e0f2e..bee37c6 100644
      @staticmethod
      def _to_batched_eval_sample(sample):
          video = sample["video"]
-@@ -363,7 +482,7 @@ class Wan22Trainer:
+@@ -363,7 +500,7 @@ class Wan22Trainer:
                      f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                  )
  
@@ -1306,7 +1706,7 @@ index 75e0f2e..bee37c6 100644
              "video": video,
              "prompt": prompt,
              "action": action,
-@@ -372,9 +491,186 @@ class Wan22Trainer:
+@@ -372,9 +509,238 @@ class Wan22Trainer:
              "context_mask": context_mask,
              "action_horizon": action_horizon,
          }
@@ -1375,21 +1775,70 @@ index 75e0f2e..bee37c6 100644
 +            result[name] = value
 +        return result
  
++    @staticmethod
      @torch.no_grad()
++    def _merge_fixed_probe_result_shards(
++        shards: list[list[dict]], expected_indices: tuple[int, ...]
++    ) -> list[dict]:
++        records = [record for shard in shards for record in shard]
++        records.sort(key=lambda record: int(record["eval_probe_position"]))
++        expected_positions = list(range(len(expected_indices)))
++        actual_positions = [int(record["eval_probe_position"]) for record in records]
++        if actual_positions != expected_positions:
++            raise RuntimeError(
++                "Distributed eval probe coverage mismatch: "
++                f"expected_positions={expected_positions}, actual_positions={actual_positions}."
++            )
++        for position, (record, expected_index) in enumerate(
++            zip(records, expected_indices)
++        ):
++            if int(record["eval_index"]) != int(expected_index):
++                raise RuntimeError(
++                    "Distributed eval probe index mismatch at position "
++                    f"{position}: expected={expected_index}, "
++                    f"actual={record['eval_index']}."
++                )
++        return records
++
      def evaluate(self):
 +        if self.val_dataset is None:
 +            return None
 +        if not self.eval_fixed_indices:
 +            return self._evaluate_single()
 +
-+        probe_results = [
++        assignments = [
++            (position, eval_index)
++            for position, eval_index in enumerate(self.eval_fixed_indices)
++            if position % self.accelerator.num_processes
++            == self.accelerator.process_index
++        ]
++        local_probe_results = [
 +            self._evaluate_single(
 +                eval_index_override=eval_index,
 +                eval_probe_position=position,
 +                artifact_suffix=f"_eval_{eval_index:06d}",
 +            )
-+            for position, eval_index in enumerate(self.eval_fixed_indices)
++            for position, eval_index in assignments
 +        ]
++        if self.accelerator.num_processes > 1:
++            if not torch.distributed.is_initialized():
++                raise RuntimeError(
++                    "Distributed fixed-probe evaluation requires initialized torch.distributed."
++                )
++            gathered_shards: list[list[dict] | None] = [
++                None for _ in range(self.accelerator.num_processes)
++            ]
++            torch.distributed.all_gather_object(
++                gathered_shards, local_probe_results
++            )
++            probe_shards = [
++                shard for shard in gathered_shards if shard is not None
++            ]
++        else:
++            probe_shards = [local_probe_results]
++        probe_results = self._merge_fixed_probe_result_shards(
++            probe_shards, self.eval_fixed_indices
++        )
 +        mean_keys = (
 +            "val_loss",
 +            "psnr_rg",
@@ -1434,6 +1883,7 @@ index 75e0f2e..bee37c6 100644
 +                "eval_suite": True,
 +                "eval_indices": list(self.eval_fixed_indices),
 +                "eval_probe_count": len(probe_results),
++                "distributed_world_size": int(self.accelerator.num_processes),
 +                "probe_results": probe_results,
 +                "video_path": probe_results[0]["video_path"],
 +                "video_paths": [record["video_path"] for record in probe_results],
@@ -1474,11 +1924,13 @@ index 75e0f2e..bee37c6 100644
 +        )
 +        suite_path = os.path.join(
 +            self.eval_dir,
-+            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}_suite.json",
++            f"step_{self.global_step:06d}_rank_000_suite.json",
 +        )
-+        with open(suite_path, "w", encoding="utf-8") as handle:
-+            json.dump(result, handle, ensure_ascii=True, indent=2, sort_keys=True)
-+            handle.write("\n")
++        if self.accelerator.is_main_process:
++            with open(suite_path, "w", encoding="utf-8") as handle:
++                json.dump(result, handle, ensure_ascii=True, indent=2, sort_keys=True)
++                handle.write("\n")
++        self.accelerator.wait_for_everyone()
 +        result["metrics_path"] = suite_path
 +        return result
 +
@@ -1493,7 +1945,7 @@ index 75e0f2e..bee37c6 100644
          if self.val_dataset is None:
              return None
  
-@@ -382,15 +678,39 @@ class Wan22Trainer:
+@@ -382,15 +748,39 @@ class Wan22Trainer:
          was_dit_training = model.dit.training
          model.eval()
  
@@ -1539,7 +1991,7 @@ index 75e0f2e..bee37c6 100644
          
          prompt = sample["prompt"][0]
          video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
-@@ -409,7 +729,7 @@ class Wan22Trainer:
+@@ -409,7 +799,7 @@ class Wan22Trainer:
              "text_cfg_scale": 1.0,
              "action_cfg_scale": 1.0,
              "num_inference_steps": self.eval_num_inference_steps,
@@ -1548,7 +2000,7 @@ index 75e0f2e..bee37c6 100644
              "tiled": False,
          }
          if sample["context"] is not None:
-@@ -418,6 +738,18 @@ class Wan22Trainer:
+@@ -418,6 +808,18 @@ class Wan22Trainer:
              infer_kwargs["context_mask"] = sample["context_mask"][0]
          else:
              infer_kwargs["prompt"] = prompt
@@ -1567,7 +2019,7 @@ index 75e0f2e..bee37c6 100644
  
          pred = model.infer(
              **infer_kwargs,
-@@ -440,58 +772,190 @@ class Wan22Trainer:
+@@ -440,58 +842,190 @@ class Wan22Trainer:
  
          action_l1 = None
          action_l2 = None
@@ -1802,7 +2254,7 @@ index 75e0f2e..bee37c6 100644
  
          # 4. VAE reconstruction metrics against GT video
          gt_video_batch = video0.unsqueeze(0).to(device=model.device, dtype=model.torch_dtype)
-@@ -510,20 +974,34 @@ class Wan22Trainer:
+@@ -510,20 +1044,34 @@ class Wan22Trainer:
          psnr_rollout_vs_decode = video_psnr(pred=pred_video_tensor, target=vae_video_tensor)
          ssim_rollout_vs_decode = video_ssim(pred=pred_video_tensor, target=vae_video_tensor)
  
@@ -1844,7 +2296,23 @@ index 75e0f2e..bee37c6 100644
  
          local_metrics = torch.tensor(
              [
-@@ -562,6 +1040,68 @@ class Wan22Trainer:
+@@ -539,11 +1087,10 @@ class Wan22Trainer:
+             ],
+             device=self.accelerator.device,
+             dtype=torch.float32,
+-        ).unsqueeze(0)
+-        gathered_metrics = self.accelerator.gather_for_metrics(local_metrics)
+-        mean_metrics = gathered_metrics[:, :7].mean(dim=0)
+-        action_l2_mean = gathered_metrics[:, 7].mean().item() if action_l2 is not None else None
+-        action_l1_mean = gathered_metrics[:, 8].mean().item() if action_l1 is not None else None
++        )
++        mean_metrics = local_metrics[:7]
++        action_l2_mean = local_metrics[7].item() if action_l2 is not None else None
++        action_l1_mean = local_metrics[8].item() if action_l1 is not None else None
+ 
+         if was_dit_training:
+             self._set_dit_only_train_mode()
+@@ -562,6 +1109,68 @@ class Wan22Trainer:
              result["action_l2"] = float(action_l2_mean)
          if action_l1_mean is not None:
              result["action_l1"] = float(action_l1_mean)
@@ -1913,7 +2381,7 @@ index 75e0f2e..bee37c6 100644
          return result
  
      def _save_weights_checkpoint(self, step_tag: str):
-@@ -590,6 +1130,9 @@ class Wan22Trainer:
+@@ -590,6 +1199,9 @@ class Wan22Trainer:
          self.accelerator.wait_for_everyone()
  
          state_path = os.path.join(self.state_dir, step_tag)
@@ -1923,7 +2391,82 @@ index 75e0f2e..bee37c6 100644
          ensure_dir(state_path)
          self.accelerator.save_state(output_dir=state_path)
          if self.accelerator.is_main_process:
-@@ -652,9 +1195,23 @@ class Wan22Trainer:
+@@ -643,6 +1255,74 @@ class Wan22Trainer:
+             state_file,
+         )
+ 
++    @staticmethod
++    def _compute_training_loss_through_wrapper(model, sample):
++        result = model(sample)
++        if not isinstance(result, tuple) or len(result) != 2:
++            raise TypeError(
++                "Training model forward must return (loss, loss_metrics)."
++            )
++        return result
++
++    def _validate_distributed_first_batch(self, sample) -> None:
++        if self.accelerator.num_processes <= 1:
++            return
++        sample_index = sample.get("sample_index")
++        if not isinstance(sample_index, torch.Tensor):
++            raise TypeError(
++                "Distributed training requires tensor sample_index metadata."
++            )
++        local_indices = sample_index.detach().to(
++            device=self.accelerator.device, dtype=torch.int64
++        ).reshape(-1)
++        gathered_indices = self.accelerator.gather(local_indices).reshape(-1)
++        expected_count = self.batch_size * self.accelerator.num_processes
++        if gathered_indices.numel() != expected_count:
++            raise RuntimeError(
++                "Distributed first batch has the wrong global size: "
++                f"expected={expected_count}, actual={gathered_indices.numel()}."
++            )
++        if torch.unique(gathered_indices).numel() != gathered_indices.numel():
++            raise RuntimeError(
++                "Distributed first batch was not sharded into unique samples: "
++                f"indices={gathered_indices.cpu().tolist()}."
++            )
++        if self.accelerator.is_main_process:
++            logger.info(
++                "DDP first global batch is uniquely sharded: sample_indices=%s",
++                gathered_indices.cpu().tolist(),
++            )
++
++    def _assert_distributed_parameter_consistency(self) -> None:
++        if self.accelerator.num_processes <= 1:
++            return
++        fragments = []
++        for parameter in self.model.parameters():
++            if not parameter.requires_grad or parameter.numel() == 0:
++                continue
++            fragments.append(
++                parameter.detach().reshape(-1)[:256].to(dtype=torch.float32)
++            )
++            if len(fragments) == 4:
++                break
++        if not fragments:
++            raise RuntimeError("Distributed parameter check found no trainable parameters.")
++        local_probe = torch.cat(fragments).unsqueeze(0)
++        gathered = self.accelerator.gather(local_probe)
++        max_difference = float(
++            (gathered - gathered[0:1]).abs().max().detach().cpu().item()
++        )
++        if not np.isfinite(max_difference) or max_difference > 1.0e-6:
++            raise RuntimeError(
++                "DDP parameters diverged after the first optimizer step: "
++                f"max_difference={max_difference}."
++            )
++        if self.accelerator.is_main_process:
++            logger.info(
++                "DDP parameter synchronization check passed: max_difference=%.3e",
++                max_difference,
++            )
++
+     def train(self):
+         self._set_dit_only_train_mode()
+ 
+@@ -652,14 +1332,30 @@ class Wan22Trainer:
              raise ValueError("`max_steps` must be set before entering the while-step training loop.")
  
          logger.info("Starting training with max_steps=%d.", self.max_steps)
@@ -1948,7 +2491,37 @@ index 75e0f2e..bee37c6 100644
  
          while self.global_step < self.max_steps:
              try:
-@@ -690,7 +1247,7 @@ class Wan22Trainer:
+                 sample = next(data_iter)
+                 self.batch_in_epoch += 1
++                if self.global_step == 0 and self.batch_in_epoch == 1:
++                    self._validate_distributed_first_batch(sample)
+             except StopIteration:
+                 self.epoch += 1
+                 self.batch_in_epoch = 0
+@@ -668,10 +1364,10 @@ class Wan22Trainer:
+                 continue
+ 
+             with self.accelerator.accumulate(self.model):
+-                train_model = self.model if hasattr(self.model, "training_loss") else self.accelerator.unwrap_model(self.model)
+-
+                 with self.accelerator.autocast():
+-                    loss, loss_dict = train_model.training_loss(sample)
++                    loss, loss_dict = self._compute_training_loss_through_wrapper(
++                        self.model, sample
++                    )
+                 self.accelerator.backward(loss)
+ 
+                 if self.accelerator.sync_gradients:
+@@ -681,6 +1377,8 @@ class Wan22Trainer:
+                         self.scheduler.step()
+                     self.optimizer.zero_grad(set_to_none=True)
+                     self.global_step += 1
++                    if self.global_step == 1:
++                        self._assert_distributed_parameter_consistency()
+                     global_loss = float(
+                         self.accelerator.gather(loss.detach().float().reshape(1)).mean().item()
+                     )
+@@ -690,7 +1388,7 @@ class Wan22Trainer:
                          global_loss_metrics[key] = float(
                              self.accelerator.gather(metric_tensor).mean().item()
                          )
@@ -1957,7 +2530,7 @@ index 75e0f2e..bee37c6 100644
                      global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
  
                      current_lr = float(self.optimizer.param_groups[0]["lr"])
-@@ -733,11 +1290,11 @@ class Wan22Trainer:
+@@ -733,11 +1431,11 @@ class Wan22Trainer:
                          metrics = self.evaluate()
                          self.accelerator.wait_for_everyone()
                          if metrics is not None and self.accelerator.is_main_process:
@@ -1972,7 +2545,7 @@ index 75e0f2e..bee37c6 100644
                              )
                              if "action_l2" in metrics:
                                  description += " action_l2=%.4f" % metrics["action_l2"]
-@@ -759,6 +1316,7 @@ class Wan22Trainer:
+@@ -759,6 +1457,7 @@ class Wan22Trainer:
                                  eval_payload["eval/action_l1"] = float(metrics["action_l1"])
                              self._wandb_log(eval_payload)
  
@@ -1980,7 +2553,7 @@ index 75e0f2e..bee37c6 100644
                      if self.save_every > 0 and self.global_step % self.save_every == 0:
                          ckpt_info = self.save_checkpoint()
                          if self.accelerator.is_main_process:
-@@ -770,7 +1328,8 @@ class Wan22Trainer:
+@@ -770,7 +1469,8 @@ class Wan22Trainer:
                              )
  
                      if self.global_step >= self.max_steps:
@@ -2256,6 +2829,38 @@ index 0000000..157a2b8
 +  memory_history_short: 1
 +
 +val: null
+diff --git a/configs/data/rmbench_helios_memory_81f.yaml b/configs/data/rmbench_helios_memory_81f.yaml
+new file mode 100644
+index 0000000..dfea1b1
+--- /dev/null
++++ b/configs/data/rmbench_helios_memory_81f.yaml
+@@ -0,0 +1,26 @@
++train:
++  _target_: fastwam.datasets.rmbench_memory_dataset.RMBenchMemoryDataset
++  dataset_dirs:
++    - ${oc.env:RMBENCH_HELIOS_ROOT,/public/interns/hubin/dataset/RMBench/fastwam_helios}
++  normalization_stats: ${oc.env:RMBENCH_HELIOS_ROOT,/public/interns/hubin/dataset/RMBench/fastwam_helios}/meta/normalization_stats.json
++  text_embedding_cache_dir: ${oc.env:RMBENCH_HELIOS_ROOT,/public/interns/hubin/dataset/RMBench/fastwam_helios}/text_embeds
++  tasks:
++    - ${oc.env:RMBENCH_TASK_NAME,press_button}
++  context_len: 128
++  action_dim: 80
++  proprio_dim: 80
++  num_frames: 81
++  action_video_freq_ratio: 4
++  video_size: [384, 320]
++  sample_stride: 1
++  sample_offset: 0
++  max_samples: null
++  max_samples_per_episode: null
++  normalization_clip: 10.0
++  memory_history_long: 8
++  memory_history_mid: 2
++  memory_history_short: 1
++  hdf5_cache_size: 2
++  jpeg_color_mode: opencv
++
++val: null
 diff --git a/configs/model/fastwam_joint_canonical.yaml b/configs/model/fastwam_joint_canonical.yaml
 new file mode 100644
 index 0000000..cd0df1b
@@ -2428,6 +3033,53 @@ index 0000000..e9104fc
 +train_shift: 5.0
 +infer_shift: 5.0
 +num_train_timesteps: 1000
+diff --git a/configs/sim_rmbench_helios.yaml b/configs/sim_rmbench_helios.yaml
+new file mode 100644
+index 0000000..22eea93
+--- /dev/null
++++ b/configs/sim_rmbench_helios.yaml
+@@ -0,0 +1,41 @@
++# @package _global_
++
++defaults:
++  - train
++  - override /task: rmbench_helios_memory_finetune
++  - _self_
++
++ckpt: null
++gpu_id: 0
++
++model:
++  load_text_encoder: true
++  skip_dit_load_from_pretrain: true
++  action_dit_pretrained_path: null
++
++EVALUATION:
++  rmbench_root: /public/interns/hubin/code/RMBench
++  policy_name: fastwam_policy
++  task_name: ${oc.env:RMBENCH_TASK_NAME,press_button}
++  task_config: demo_clean
++  instruction_type: unseen
++  eval_num_episodes: 100
++  output_dir: ${oc.env:RMBENCH_HELIOS_ROOT,/public/interns/hubin/dataset/RMBench/fastwam_helios}/evaluation/${oc.env:RMBENCH_TASK_NAME,press_button}
++  action_horizon: 80
++  replan_steps: 8
++  num_inference_steps: 10
++  sigma_shift: null
++  text_cfg_scale: 1.0
++  negative_prompt: ""
++  rand_device: cpu
++  tiled: false
++  timing_enabled: false
++  canonical_rmbench: true
++  normalization_stats: ${oc.env:RMBENCH_HELIOS_ROOT,/public/interns/hubin/dataset/RMBench/fastwam_helios}/meta/normalization_stats.json
++
++hydra:
++  job:
++    chdir: false
++  run:
++    dir: .
++  output_subdir: null
 diff --git a/configs/task/canonical_robocoin_joint_81f_1e-5.yaml b/configs/task/canonical_robocoin_joint_81f_1e-5.yaml
 new file mode 100644
 index 0000000..b0b6139
@@ -2848,6 +3500,245 @@ index 0000000..472dfad
 +resume: ${oc.env:FASTWAM_STAGE2_MEMORY_CKPT}
 +wandb:
 +  enabled: false
+diff --git a/configs/task/rmbench_helios_memory_finetune.yaml b/configs/task/rmbench_helios_memory_finetune.yaml
+new file mode 100644
+index 0000000..302a0ce
+--- /dev/null
++++ b/configs/task/rmbench_helios_memory_finetune.yaml
+@@ -0,0 +1,39 @@
++# @package _global_
++
++defaults:
++  - override /data: rmbench_helios_memory_81f
++  - override /model: fastwam_memory_canonical
++  - _self_
++
++output_dir: ${oc.env:RMBENCH_HELIOS_ROOT,/public/interns/hubin/dataset/RMBench/fastwam_helios}/runs/${oc.env:RMBENCH_TASK_NAME,press_button}
++batch_size: 1
++num_workers: 2
++sampling_strategy: uniform
++train_scope: model_configured
++
++learning_rate: 1.0e-5
++reference_learning_rate: 1.0e-4
++lr_scheduler_type: cosine
++num_epochs: 1000
++max_steps: 2500
++log_every: 10
++save_every: 500
++save_training_state: true
++eval_every: 0
++gradient_accumulation_steps: 1
++mixed_precision: bf16
++weight_decay: 1.0e-2
++max_grad_norm: 1.0
++
++model:
++  skip_dit_load_from_pretrain: true
++  video_dit_pretrained_path: /public/interns/hubin/dataset/robot_dataset/Process_WM_Data/work/stage_pipeline/runs/stage1_video_smoke/checkpoints/weights/step_000001.pt
++  action_dit_pretrained_path: null
++  loss:
++    lambda_video: 1.0
++    lambda_action: 1.0
++
++resume: ${oc.env:FASTWAM_RMBENCH_INIT,/public/interns/hubin/dataset/robot_dataset/Process_WM_Data/work/tuning/runs/fastwam_tianji_dataset_overfit_cont_1250_to_2500/checkpoints/weights/step_001250.pt}
++
++wandb:
++  enabled: false
+diff --git a/docs/RMBENCH_HELIOS.md b/docs/RMBENCH_HELIOS.md
+new file mode 100644
+index 0000000..0fa169a
+--- /dev/null
++++ b/docs/RMBENCH_HELIOS.md
+@@ -0,0 +1,152 @@
++# RMBench Helios MemoryFastWAM
++
++This integration trains the local Helios-style FastWAM memory architecture directly from the official RMBench `demo_clean` HDF5 files and evaluates it with the official closed-loop simulator protocol.
++
++## Protocol
++
++The leaderboard contains nine tasks, each with 50 expert demonstrations and 100 expert-feasible evaluation rollouts:
++
++- `M(1)`: `observe_and_pickup`, `rearrange_blocks`, `put_back_block`, `swap_blocks`, `swap_T`
++- `M(n)`: `battery_try`, `blocks_ranking_try`, `cover_blocks`, `press_button`
++
++The downloaded dataset also contains `place_block_mat`, `classify_blocks`, and `storage_blocks`. They are intentionally excluded from the leaderboard run because they are not part of the paper's nine-task table. The training launcher creates one checkpoint per task, matching the paper's Execution Module single-task protocol. This differs from the current public Mem-0 release announced on 2026-07-14: its five M(1) tasks share one 50K-step `m1_mix` checkpoint, while its four M(n) tasks retain separate 30K-step checkpoints.
++
++Training reads each episode's `seen` instruction, matching the official policy preprocessing scripts. Closed-loop evaluation requests `unseen`. In the currently downloaded RMBench release the two strings happen to be identical for all 450 demonstrations, but the distinction is retained in manifests and receipts so a later data revision cannot silently leak evaluation language into training.
++
++## Data Contract
++
++The loader reads raw JPEG payloads and qpos vectors from each HDF5 episode without duplicating the dataset into another video tree.
++
++| Model field | RMBench source | Shape |
++| --- | --- | ---: |
++| global image | `observation/head_camera/rgb` | target composite top |
++| left wrist | `observation/left_camera/rgb` | target composite bottom-left |
++| right wrist | `observation/right_camera/rgb` | target composite bottom-right |
++| state | `joint_action/vector[t]` | source 14D -> canonical 80D |
++| action | `joint_action/vector[t+1]` | source 14D -> canonical 80D |
++
++The Aloha vector is `[left arm 6, left gripper, right arm 6, right gripper]`. Joint values map to canonical slots `14:20` and `21:27`; grippers map to slots `6` and `13`. The remaining 66 dimensions are zeroed and masked out in both diffusion and loss computation.
++
++Each sample is fixed to:
++
++```text
++state:  81 control points
++action: 80 next-qpos targets
++video:  21 frames at offsets 0,4,...,80
++memory: 8 + 2 + 1 frames strictly before the window start
++image:  3 x 21 x 384 x 320
++```
++
++At episode starts, unavailable history is left-padded with the current frame and marked invalid. A valid memory index is always less than `window_start`; target or future frames cannot enter memory.
++
++## Preparation
++
++```bash
++cd /public/interns/hubin/code/FastWAM
++
++/public/interns/hubin/code/hubin/miniforge3/envs/fastwam/bin/python3.10 \
++  scripts/rmbench/prepare_helios_memory_data.py \
++  --data-root /public/interns/hubin/dataset/RMBench/data \
++  --output-root /public/interns/hubin/dataset/RMBench/fastwam_helios \
++  --instruction-type seen
++```
++
++The current official preparation receipt contains 450 episodes, 277,350 frames, and 241,350 valid 81-frame windows. It writes only metadata, per-task canonical normalization, and text cache files under `fastwam_helios`; source images remain in the original HDF5 files. Its manifest SHA-256 is `e24fff6bf55e8f1041d55544c74d47ef8632c47d60fc5d8d04e6d2ae12dd6163`.
++
++Precompute all official task prompts once:
++
++```bash
++RMBENCH_HELIOS_ROOT=/public/interns/hubin/dataset/RMBench/fastwam_helios \
++/public/interns/hubin/code/hubin/miniforge3/envs/fastwam/bin/python3.10 \
++  scripts/precompute_text_embeds.py task=rmbench_helios_memory_finetune \
++  'data.train.tasks=[observe_and_pickup,rearrange_blocks,put_back_block,swap_blocks,swap_T,battery_try,blocks_ranking_try,cover_blocks,press_button]'
++```
++
++## Training
++
++One task:
++
++```bash
++bash scripts/rmbench/train_rmbench_helios.sh press_button 0 2500
++```
++
++Run the full suite with one task per available GPU:
++
++```bash
++python scripts/rmbench/launch_rmbench_helios_training.py \
++  --gpus 0,1,2,3,4,5,6,7 \
++  --steps 2500
++```
++
++The default initialization is the completed Tianji Helios-memory FastWAM checkpoint: 1,250 steps followed by a 1,250-step continuation, for 2,500 total self-data steps. It contains the canonical 80D action/proprio path and trained 8/2/1 memory patchers. Set `FASTWAM_RMBENCH_INIT` to use a different compatible MemoryFastWAM checkpoint. Each RMBench task then receives a separate 2,500-step fine-tune. This is not equivalent to Mem-0's reported 30K from-scratch iterations and that distinction must remain in result reports.
++
++Every 500 steps the trainer writes both a lightweight policy checkpoint and complete Accelerator state. The suite launcher reuses an existing final checkpoint, otherwise resumes from the newest valid optimizer/scheduler state. `--force` deliberately starts again from the Stage-2 initialization and may overwrite checkpoints with the same step number.
++
++## Closed-Loop Memory
++
++At evaluation, the current simulator observation is the FastWAM `input_image`. The server stores the preceding 11 real simulator observations and passes `history + current` to `MemoryFastWAM.infer_action`; the model's memory selector excludes the current frame. Generated video latents are never fed back as observations.
++
++The policy predicts canonical 80D actions, applies the canonical invalid-dimension mask during diffusion, denormalizes with task-specific stats, and maps the 14 active values back to RMBench qpos order. It executes eight actions before replanning.
++
++The simulator and model run in separate environments because RMBench pins PyTorch 2.4.1 while FastWAM uses PyTorch 2.7.1. The H200 compute devices on this node do not expose Vulkan graphics queues to SAPIEN. `eval_rmbench_helios.sh` therefore renders through Mesa 26.1.5 lavapipe on CPU while CuRobo and FastWAM remain on the assigned CUDA device. Its defaults preserve the official ray-tracing shader, 32 samples per pixel, and path depth 8. OIDN is set to `none` because its CUDA interop requires the Vulkan render device to be CUDA-visible.
++
++RMBench's bundled CuRobo v0.7.8 uses the legacy `wp.torch` namespace. Install
++`scripts/rmbench/requirements-eval-compat.txt` in the RMBench environment; it pins
++`warp-lang==1.8.0`. Newer Warp 1.15 removes that namespace and causes both planner
++workers to exit during setup. The evaluation shell checks this compatibility before
++starting either the simulator or model server.
++
++This renderer fallback is operationally necessary but is not pixel-equivalent to the official GPU-plus-OIDN environment. The evaluation receipts record `shader`, samples, path depth, denoiser, and Vulkan device; leaderboard tables must label this renderer difference.
++
++```bash
++bash scripts/rmbench/eval_rmbench_helios.sh \
++  press_button \
++  /public/interns/hubin/dataset/RMBench/fastwam_helios/runs/press_button/checkpoints/weights/step_002500.pt \
++  0
++```
++
++This invokes RMBench's official expert-seed filtering, unseen instruction setting, task step limit, and 100-rollout success-rate calculation.
++
++Before the full suite, run one end-to-end simulator rollout by setting `RMBENCH_EVAL_ROLLOUTS=1` on the same command. Probe and formal progress files are separate. During formal evaluation the client atomically records the next seed, completed rollout count, and successes after every rollout; a restart continues from that point. A suite task is marked successful only after its `100rollouts` progress reaches 100/100 and a matching result file exists.
++
++Run all nine task checkpoints in parallel, with both the FastWAM server and CuRobo
++simulator pinned to the assigned physical GPU. The full local 9 x 100 run uses one
++sample per pixel and path depth one because the Vulkan renderer is CPU-only on this
++node; without this explicit override, the 32/8 defaults are not operationally
++tractable for the complete suite:
++
++```bash
++RMBENCH_RT_SAMPLES=1 \
++RMBENCH_RT_PATH_DEPTH=1 \
++RMBENCH_RT_DENOISER=none \
++python scripts/rmbench/launch_rmbench_helios_evaluation.py \
++  --gpus 0,1,2,3,4,5,6,7 \
++  --jobs-per-gpu 2 \
++  --step 2500
++```
++
++Slots are assigned breadth-first: all eight GPUs receive one task before any GPU receives a
++second task. With nine tasks, only GPU 0 gets a second server. A measured server plus simulator
++uses about 29 GB on an H200, so two isolated jobs fit without sharing model state. Each slot has
++its own TCP port, log, progress receipt, result directory, and model process.
++
++The comparison report reads renderer settings from task receipts instead of assuming
++the defaults. Consequently, the resulting success rates are a closed-loop functional
++comparison under a lower-quality local renderer, not a pixel-equivalent reproduction
++of the official GPU-plus-OIDN benchmark.
++
++The launcher writes one resumable receipt per task under
++`fastwam_helios/evaluation/receipts`. A completed task is reused only when its
++receipt points to the same checkpoint and an existing official `_result.txt`.
++
++## Leaderboard
++
++Generate the comparison after all nine evaluations finish:
++
++```bash
++python scripts/rmbench/summarize_rmbench_results.py
++```
++
++The paper-table total averages are DP 5.8%, ACT 5.9%, Pi0.5 10.4%, X-VLA 9.8%, and Mem-0 42.0%. The current public Mem-0 release reports 56.6% on M(1) and 28.5% on M(n), or 44.1% across all nine tasks. The comparison script preserves both Mem-0 result sets, computes `M(1)`, `M(n)`, and total FastWAM averages, and writes both JSON and Markdown receipts. Helios uses only 2,500 task-specific fine-tune steps and a different architecture, so neither column is a budget-matched comparison.
++
++Sources: [RMBench project](https://rmbench.github.io/), [paper](https://arxiv.org/abs/2603.01229), [official repository](https://github.com/robotwin-Platform/rmbench), [current M(1) release](https://huggingface.co/qiuly/Mem-0-m1mix-RMBench), and [current M(n) release](https://huggingface.co/qiuly/Mem-0-mn-RMBench).
+diff --git a/experiments/robotwin/fastwam_helios_client/__init__.py b/experiments/robotwin/fastwam_helios_client/__init__.py
+new file mode 100644
+index 0000000..7b33445
+--- /dev/null
++++ b/experiments/robotwin/fastwam_helios_client/__init__.py
+@@ -0,0 +1,30 @@
++"""Dependency-light RMBench client bridge for the FastWAM model server."""
++
++from __future__ import annotations
++
++import numpy as np
++
++
++def get_model(_usr_args):
++    raise RuntimeError("fastwam_helios_client is a socket client and does not load a local model.")
++
++
++def eval(task_env, model_client, observation):
++    instruction = task_env.get_instruction()
++    payload = dict(observation)
++    payload["_fastwam_instruction"] = instruction
++    actions = np.asarray(
++        model_client.call(func_name="get_action", obs=payload), dtype=np.float32
++    )
++    for action_index, action in enumerate(actions):
++        task_env.take_action(action, action_type="qpos")
++        if task_env.eval_success:
++            break
++        if action_index + 1 < len(actions):
++            follow_up = dict(task_env.get_obs())
++            follow_up["_fastwam_instruction"] = instruction
++            model_client.call(func_name="update_obs", obs=follow_up)
++
++
++def reset_model(model_client):
++    return model_client.call(func_name="reset_model")
 diff --git a/scripts/prewarm_tar_video_cache.py b/scripts/prewarm_tar_video_cache.py
 new file mode 100644
 index 0000000..ad1dc87
@@ -2931,6 +3822,1379 @@ index 0000000..ad1dc87
 +
 +if __name__ == "__main__":
 +    main()
+diff --git a/scripts/rmbench/eval_rmbench_helios.sh b/scripts/rmbench/eval_rmbench_helios.sh
+new file mode 100755
+index 0000000..00e2b5b
+--- /dev/null
++++ b/scripts/rmbench/eval_rmbench_helios.sh
+@@ -0,0 +1,120 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++FASTWAM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++RMBENCH_ROOT="${RMBENCH_ROOT:-/public/interns/hubin/code/RMBench}"
++RMBENCH_HELIOS_ROOT="${RMBENCH_HELIOS_ROOT:-/public/interns/hubin/dataset/RMBench/fastwam_helios}"
++FASTWAM_PYTHON="${FASTWAM_PYTHON:-/public/interns/hubin/code/hubin/miniforge3/envs/fastwam/bin/python3.10}"
++RMBENCH_PYTHON="${RMBENCH_PYTHON:-/public/interns/hubin/envs/rmbench/bin/python}"
++RMBENCH_ENV_BIN="$(dirname "${RMBENCH_PYTHON}")"
++MESA_LAVAPIPE_ROOT="${MESA_LAVAPIPE_ROOT:-/public/interns/hubin/envs/mesa-26.1.5-lavapipe}"
++MESA_LAVAPIPE_ICD="${MESA_LAVAPIPE_ROOT}/share/vulkan/icd.d/lvp_icd.x86_64.json"
++
++if [[ $# -lt 3 ]]; then
++  echo "Usage: $0 <task_name> <checkpoint.pt> <gpu_id> [port]" >&2
++  exit 1
++fi
++
++if [[ ! -f "${MESA_LAVAPIPE_ICD}" ]]; then
++  echo "Mesa lavapipe Vulkan ICD is missing: ${MESA_LAVAPIPE_ICD}" >&2
++  exit 1
++fi
++
++if ! "${RMBENCH_PYTHON}" - <<'PY'
++import importlib.metadata
++import warp
++
++version = importlib.metadata.version("warp-lang")
++if not hasattr(warp, "torch"):
++    raise SystemExit(
++        f"warp-lang {version} lacks wp.torch; install scripts/rmbench/"
++        "requirements-eval-compat.txt in the RMBench environment"
++    )
++print(f"RMBench Warp compatibility: warp-lang {version}, wp.torch available")
++PY
++then
++  exit 1
++fi
++
++TASK_NAME="$1"
++CHECKPOINT="$(readlink -f "$2")"
++GPU_ID="$3"
++PORT="${4:-$((19000 + GPU_ID))}"
++STATS="${RMBENCH_HELIOS_ROOT}/meta/normalization_stats.json"
++POLICY_CONFIG="${FASTWAM_ROOT}/experiments/robotwin/fastwam_policy/deploy_policy.yml"
++SERVER_LOG="${RMBENCH_HELIOS_ROOT}/evaluation/${TASK_NAME}/model_server.log"
++CLIENT_LOG="${RMBENCH_HELIOS_ROOT}/evaluation/${TASK_NAME}/eval_client.log"
++EVAL_ROLLOUTS="${RMBENCH_EVAL_ROLLOUTS:-100}"
++PROGRESS_PATH="${RMBENCH_HELIOS_ROOT}/evaluation/${TASK_NAME}/progress_$(basename "${CHECKPOINT}" .pt)_${EVAL_ROLLOUTS}rollouts.json"
++XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/rmbench-xdg-${UID}-${GPU_ID}-${PORT}}"
++
++mkdir -p "$(dirname "${SERVER_LOG}")"
++mkdir -p "${XDG_RUNTIME_DIR}"
++chmod 700 "${XDG_RUNTIME_DIR}"
++cd "${RMBENCH_ROOT}"
++
++export RMBENCH_TASK_NAME="${TASK_NAME}"
++export RMBENCH_HELIOS_ROOT
++export CUDA_VISIBLE_DEVICES="${GPU_ID}"
++export PYTHONUNBUFFERED=1
++export PATH="${RMBENCH_ENV_BIN}:${PATH}"
++export XDG_RUNTIME_DIR
++export VK_ICD_FILENAMES="${MESA_LAVAPIPE_ICD}"
++export __EGL_VENDOR_LIBRARY_FILENAMES=/dev/null
++export LP_NUM_THREADS="${RMBENCH_LP_NUM_THREADS:-16}"
++export RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-rt}"
++export RMBENCH_RT_SAMPLES="${RMBENCH_RT_SAMPLES:-32}"
++export RMBENCH_RT_PATH_DEPTH="${RMBENCH_RT_PATH_DEPTH:-8}"
++export RMBENCH_RT_DENOISER="${RMBENCH_RT_DENOISER:-none}"
++export PYTHONPATH="${FASTWAM_ROOT}/experiments/robotwin:${FASTWAM_ROOT}/src:${FASTWAM_ROOT}:${RMBENCH_ROOT}/policy:${RMBENCH_ROOT}:${PYTHONPATH:-}"
++export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-${FASTWAM_ROOT}/checkpoints}"
++
++if ! "${RMBENCH_PYTHON}" - <<'PY'
++import sapien
++
++print(f"RMBench renderer preflight: SAPIEN {getattr(sapien, '__version__', 'unknown')}")
++PY
++then
++  echo "SAPIEN failed under the configured Mesa/EGL environment." >&2
++  exit 1
++fi
++
++"${FASTWAM_PYTHON}" script/policy_model_server.py \
++  --port "${PORT}" \
++  --config "${POLICY_CONFIG}" \
++  --overrides \
++  --policy_name fastwam_policy \
++  --task_name "${TASK_NAME}" \
++  --task_config demo_clean \
++  --ckpt_setting "${CHECKPOINT}" \
++  --dataset_stats_path "${STATS}" \
++  --sim_cfg_name sim_rmbench_helios.yaml \
++  --sim_task rmbench_helios_memory_finetune \
++  --canonical_rmbench true \
++  --device cuda \
++  --mixed_precision bf16 \
++  --action_horizon 80 \
++  --replan_steps 8 \
++  --num_inference_steps 10 \
++  >"${SERVER_LOG}" 2>&1 &
++SERVER_PID=$!
++
++cleanup() {
++  kill "${SERVER_PID}" 2>/dev/null || true
++  wait "${SERVER_PID}" 2>/dev/null || true
++}
++trap cleanup EXIT INT TERM
++
++"${RMBENCH_PYTHON}" script/eval_policy_client.py \
++  --port "${PORT}" \
++  --config "${POLICY_CONFIG}" \
++  --overrides \
++  --policy_name fastwam_helios_client \
++  --task_name "${TASK_NAME}" \
++  --task_config demo_clean \
++  --ckpt_setting "${CHECKPOINT}" \
++  --instruction_type unseen \
++  --eval_num_episodes "${EVAL_ROLLOUTS}" \
++  --progress_path "${PROGRESS_PATH}" \
++  --seed 0 \
++  2>&1 | tee "${CLIENT_LOG}"
+diff --git a/scripts/rmbench/launch_rmbench_helios_evaluation.py b/scripts/rmbench/launch_rmbench_helios_evaluation.py
+new file mode 100755
+index 0000000..9e388a4
+--- /dev/null
++++ b/scripts/rmbench/launch_rmbench_helios_evaluation.py
+@@ -0,0 +1,264 @@
++#!/usr/bin/env python3
++"""Run official RMBench evaluations with one task bound to each GPU."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import subprocess
++import time
++from pathlib import Path
++from typing import Any
++
++from launch_rmbench_helios_training import _checkpoint_is_complete
++from prepare_helios_memory_data import OFFICIAL_TASKS
++
++
++def _read_json(path: Path) -> dict[str, Any] | None:
++    try:
++        return json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError):
++        return None
++
++
++def _checkpoint(root: Path, task: str, step: int) -> Path:
++    weights = root / "runs" / task / "checkpoints" / "weights"
++    exact = weights / f"step_{step:06d}.pt"
++    if _checkpoint_is_complete(exact):
++        return exact.resolve()
++    raise FileNotFoundError(
++        f"Complete FastWAM checkpoint step {step} not found for {task}: {exact}"
++    )
++
++
++def _latest_result(rmbench_root: Path, task: str, since: float) -> Path | None:
++    task_root = rmbench_root / "eval_result" / task / "fastwam_helios_client"
++    candidates = [
++        path
++        for path in task_root.glob("**/_result.txt")
++        if path.stat().st_mtime >= since - 2.0
++    ]
++    return max(candidates, key=lambda path: path.stat().st_mtime) if candidates else None
++
++
++def _available_slots(
++    gpus: list[str], jobs_per_gpu: int, occupied: set[tuple[str, int]]
++) -> list[tuple[str, int]]:
++    return [
++        (gpu, slot)
++        for slot in range(jobs_per_gpu)
++        for gpu in gpus
++        if (gpu, slot) not in occupied
++    ]
++
++
++def _port_for_slot(port_base: int, gpu: str, jobs_per_gpu: int, slot: int) -> int:
++    return port_base + int(gpu) * jobs_per_gpu + slot
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
++    parser.add_argument("--tasks", nargs="*", default=list(OFFICIAL_TASKS))
++    parser.add_argument("--step", type=int, default=2500)
++    parser.add_argument("--port-base", type=int, default=19000)
++    parser.add_argument("--jobs-per-gpu", type=int, default=1)
++    parser.add_argument("--force", action="store_true")
++    parser.add_argument(
++        "--root",
++        type=Path,
++        default=Path("/public/interns/hubin/dataset/RMBench/fastwam_helios"),
++    )
++    parser.add_argument(
++        "--rmbench-root",
++        type=Path,
++        default=Path("/public/interns/hubin/code/RMBench"),
++    )
++    args = parser.parse_args()
++    gpus = [value.strip() for value in args.gpus.split(",") if value.strip()]
++    try:
++        gpu_indices = [int(value) for value in gpus]
++    except ValueError:
++        gpu_indices = []
++    unknown = [task for task in args.tasks if task not in OFFICIAL_TASKS]
++    if (
++        not gpus
++        or len(gpu_indices) != len(gpus)
++        or any(value < 0 for value in gpu_indices)
++        or len(gpu_indices) != len(set(gpu_indices))
++        or args.step <= 0
++        or args.jobs_per_gpu <= 0
++        or not 1 <= args.port_base <= 65535
++        or args.port_base + (max(gpu_indices, default=0) + 1) * args.jobs_per_gpu > 65536
++        or not args.tasks
++        or len(args.tasks) != len(set(args.tasks))
++        or unknown
++    ):
++        parser.error(
++            "At least one GPU, positive --step/--jobs-per-gpu, a valid port range, "
++            f"and unique official task names are required; unknown={unknown}"
++        )
++
++    root = args.root.expanduser().resolve()
++    rmbench_root = args.rmbench_root.expanduser().resolve()
++    script = Path(__file__).with_name("eval_rmbench_helios.sh").resolve()
++    receipt_dir = root / "evaluation" / "receipts"
++    log_dir = root / "evaluation" / "launch_logs"
++    receipt_dir.mkdir(parents=True, exist_ok=True)
++    log_dir.mkdir(parents=True, exist_ok=True)
++
++    pending: list[tuple[str, Path]] = []
++    results: dict[str, dict[str, Any]] = {}
++    for task in args.tasks:
++        checkpoint = _checkpoint(root, task, args.step)
++        receipt_path = receipt_dir / f"{task}.json"
++        existing = _read_json(receipt_path)
++        existing_progress = (
++            None
++            if existing is None
++            else _read_json(Path(str(existing.get("progress_path", ""))))
++        )
++        if (
++            not args.force
++            and existing is not None
++            and existing.get("status") == "succeeded"
++            and existing.get("checkpoint") == str(checkpoint)
++            and Path(str(existing.get("result_path", ""))).is_file()
++            and existing_progress is not None
++            and existing_progress.get("status") == "completed"
++            and int(existing_progress.get("evaluated_rollouts", -1)) == 100
++        ):
++            results[task] = existing
++            print(f"[reuse] task={task} result={existing['result_path']}", flush=True)
++        else:
++            pending.append((task, checkpoint))
++
++    running: dict[
++        str, tuple[subprocess.Popen[bytes], object, str, int, int, Path, float]
++    ] = {}
++    while pending or running:
++        occupied = {(value[2], value[3]) for value in running.values()}
++        for gpu, gpu_slot in _available_slots(gpus, args.jobs_per_gpu, occupied):
++            if not pending:
++                break
++            task, checkpoint = pending.pop(0)
++            port = _port_for_slot(args.port_base, gpu, args.jobs_per_gpu, gpu_slot)
++            log_path = log_dir / f"{task}.log"
++            if args.force:
++                (
++                    root
++                    / "evaluation"
++                    / task
++                    / f"progress_step_{args.step:06d}_100rollouts.json"
++                ).unlink(missing_ok=True)
++            log_handle = log_path.open("a", encoding="utf-8")
++            started_at = time.time()
++            environment = os.environ.copy()
++            environment["RMBENCH_HELIOS_ROOT"] = str(root)
++            environment["RMBENCH_ROOT"] = str(rmbench_root)
++            process = subprocess.Popen(
++                [str(script), task, str(checkpoint), gpu, str(port)],
++                stdout=log_handle,
++                stderr=subprocess.STDOUT,
++                start_new_session=True,
++                env=environment,
++            )
++            running[task] = (
++                process,
++                log_handle,
++                gpu,
++                gpu_slot,
++                port,
++                checkpoint,
++                started_at,
++            )
++            print(
++                f"[launch] task={task} gpu={gpu} slot={gpu_slot} port={port} "
++                f"pid={process.pid} "
++                f"checkpoint={checkpoint} log={log_path}",
++                flush=True,
++            )
++
++        if running:
++            time.sleep(10)
++        for task, values in list(running.items()):
++            process, log_handle, gpu, gpu_slot, port, checkpoint, started_at = values
++            return_code = process.poll()
++            if return_code is None:
++                continue
++            log_handle.close()
++            result_path = _latest_result(rmbench_root, task, started_at)
++            progress_path = (
++                root
++                / "evaluation"
++                / task
++                / f"progress_step_{args.step:06d}_100rollouts.json"
++            )
++            progress = _read_json(progress_path)
++            succeeded = (
++                return_code == 0
++                and result_path is not None
++                and progress is not None
++                and progress.get("status") == "completed"
++                and int(progress.get("evaluated_rollouts", -1)) == 100
++                and int((progress.get("identity") or {}).get("target_rollouts", -1)) == 100
++            )
++            receipt = {
++                "schema_version": "fastwam-rmbench-evaluation-task-v1",
++                "status": "succeeded" if succeeded else "failed",
++                "task": task,
++                "gpu": gpu,
++                "gpu_slot": gpu_slot,
++                "port": port,
++                "checkpoint": str(checkpoint),
++                "return_code": return_code,
++                "result_path": None if result_path is None else str(result_path.resolve()),
++                "progress_path": str(progress_path.resolve()),
++                "started_at_unix": started_at,
++                "finished_at_unix": time.time(),
++                "protocol": {
++                    "rollouts": 100,
++                    "instruction_type": "unseen",
++                    "expert_seed_filter": True,
++                    "renderer": {
++                        "shader": os.environ.get("RMBENCH_RENDER_SHADER", "rt"),
++                        "samples_per_pixel": int(
++                            os.environ.get("RMBENCH_RT_SAMPLES", "32")
++                        ),
++                        "path_depth": int(
++                            os.environ.get("RMBENCH_RT_PATH_DEPTH", "8")
++                        ),
++                        "denoiser": os.environ.get("RMBENCH_RT_DENOISER", "none"),
++                        "vulkan_device": "Mesa lavapipe (CPU)",
++                    },
++                },
++            }
++            (receipt_dir / f"{task}.json").write_text(
++                json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
++            )
++            results[task] = receipt
++            del running[task]
++            print(
++                f"[done] task={task} gpu={gpu} status={receipt['status']} "
++                f"result={receipt['result_path']}",
++                flush=True,
++            )
++
++    suite = {
++        "schema_version": "fastwam-rmbench-evaluation-suite-v1",
++        "tasks": list(args.tasks),
++        "checkpoint_step_requested": args.step,
++        "jobs_per_gpu": args.jobs_per_gpu,
++        "results": results,
++        "succeeded": all(item.get("status") == "succeeded" for item in results.values()),
++    }
++    suite_path = root / "evaluation" / "evaluation_suite_receipt.json"
++    suite_path.write_text(json.dumps(suite, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(json.dumps(suite, indent=2, sort_keys=True))
++    if not suite["succeeded"]:
++        raise SystemExit(1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rmbench/launch_rmbench_helios_training.py b/scripts/rmbench/launch_rmbench_helios_training.py
+new file mode 100755
+index 0000000..aceac4f
+--- /dev/null
++++ b/scripts/rmbench/launch_rmbench_helios_training.py
+@@ -0,0 +1,240 @@
++#!/usr/bin/env python3
++"""Launch task-specific RMBench fine-tunes, one process per GPU."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import os
++import subprocess
++import time
++import zipfile
++from pathlib import Path
++from typing import Any
++
++from prepare_helios_memory_data import OFFICIAL_TASKS
++
++
++DEFAULT_INITIALIZATION = Path(
++    "/public/interns/hubin/dataset/robot_dataset/Process_WM_Data/work/tuning/runs/"
++    "fastwam_tianji_dataset_overfit_cont_1250_to_2500/checkpoints/weights/"
++    "step_001250.pt"
++)
++
++
++def _read_json(path: Path) -> dict[str, Any] | None:
++    try:
++        return json.loads(path.read_text(encoding="utf-8"))
++    except (OSError, json.JSONDecodeError):
++        return None
++
++
++def _latest_training_state(root: Path, task: str, max_step: int) -> Path | None:
++    state_root = root / "runs" / task / "checkpoints" / "state"
++    candidates: list[tuple[int, Path]] = []
++    for path in state_root.glob("step_*"):
++        try:
++            step = int(path.name.removeprefix("step_"))
++        except ValueError:
++            continue
++        trainer_state = _read_json(path / "trainer_state.json")
++        required_state_files = (
++            "model.safetensors",
++            "optimizer.bin",
++            "scheduler.bin",
++            "random_states_0.pkl",
++        )
++        if (
++            step < max_step
++            and trainer_state is not None
++            and int(trainer_state.get("global_step", -1)) == step
++            and all((path / name).is_file() for name in required_state_files)
++        ):
++            candidates.append((step, path.resolve()))
++    return max(candidates, default=(0, None), key=lambda item: item[0])[1]
++
++
++def _checkpoint_is_complete(path: Path) -> bool:
++    if not path.is_file() or path.stat().st_size <= 0:
++        return False
++    try:
++        with zipfile.ZipFile(path) as archive:
++            names = archive.namelist()
++        return any(name.endswith("/data.pkl") for name in names) and any(
++            name.endswith("/version") for name in names
++        )
++    except (OSError, zipfile.BadZipFile):
++        return False
++
++
++def main() -> None:
++    parser = argparse.ArgumentParser()
++    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
++    parser.add_argument("--tasks", nargs="*", default=list(OFFICIAL_TASKS))
++    parser.add_argument("--steps", type=int, default=2500)
++    parser.add_argument("--force", action="store_true")
++    parser.add_argument(
++        "--root",
++        type=Path,
++        default=Path("/public/interns/hubin/dataset/RMBench/fastwam_helios"),
++    )
++    args = parser.parse_args()
++    gpus = [value.strip() for value in args.gpus.split(",") if value.strip()]
++    try:
++        gpu_indices = [int(value) for value in gpus]
++    except ValueError:
++        gpu_indices = []
++    unknown = [task for task in args.tasks if task not in OFFICIAL_TASKS]
++    if (
++        not gpus
++        or len(gpu_indices) != len(gpus)
++        or any(value < 0 for value in gpu_indices)
++        or len(gpu_indices) != len(set(gpu_indices))
++        or args.steps <= 0
++        or not args.tasks
++        or len(args.tasks) != len(set(args.tasks))
++        or unknown
++    ):
++        parser.error(
++            "At least one GPU, positive --steps, and unique official task names are "
++            f"required; unknown={unknown}."
++        )
++
++    script = Path(__file__).with_name("train_rmbench_helios.sh").resolve()
++    root = args.root.expanduser().resolve()
++    initialization = Path(
++        os.environ.get("FASTWAM_RMBENCH_INIT", str(DEFAULT_INITIALIZATION))
++    ).expanduser().resolve()
++    if not _checkpoint_is_complete(initialization):
++        raise SystemExit(
++            f"MemoryFastWAM initialization checkpoint is incomplete: {initialization}"
++        )
++    log_dir = root / "launch_logs"
++    log_dir.mkdir(parents=True, exist_ok=True)
++    pending: list[tuple[str, Path | None]] = []
++    running: dict[
++        str, tuple[subprocess.Popen, object, str, float, Path | None]
++    ] = {}
++    results: dict[str, dict[str, object]] = {}
++    for task in args.tasks:
++        final_checkpoint = (
++            root / "runs" / task / "checkpoints" / "weights" / f"step_{args.steps:06d}.pt"
++        )
++        task_receipt_path = root / "runs" / task / "training_receipt.json"
++        task_receipt = _read_json(task_receipt_path)
++        reusable = (
++            _checkpoint_is_complete(final_checkpoint)
++            and task_receipt is not None
++            and task_receipt.get("status") == "succeeded"
++            and task_receipt.get("initialization_checkpoint") == str(initialization)
++            and int(task_receipt.get("target_steps", -1)) == args.steps
++            and task_receipt.get("checkpoint") == str(final_checkpoint.resolve())
++        )
++        if reusable and not args.force:
++            results[task] = {
++                "return_code": 0,
++                "gpu": None,
++                "status": "reused",
++                "checkpoint": str(final_checkpoint.resolve()),
++            }
++            print(f"[reuse] task={task} checkpoint={final_checkpoint}", flush=True)
++            continue
++        if _checkpoint_is_complete(final_checkpoint) and not args.force:
++            raise SystemExit(
++                "A complete final checkpoint exists without a matching training receipt: "
++                f"{final_checkpoint}. Inspect it, then rerun with --force only if overwrite "
++                "is intended."
++            )
++        resume = None if args.force else _latest_training_state(root, task, args.steps)
++        pending.append((task, resume))
++
++    while pending or running:
++        busy_gpus = {gpu for _, _, gpu, _, _ in running.values()}
++        for gpu in gpus:
++            if not pending or gpu in busy_gpus:
++                continue
++            task, resume = pending.pop(0)
++            log_path = log_dir / f"{task}.log"
++            log_handle = log_path.open("a", encoding="utf-8")
++            env = os.environ.copy()
++            env["RMBENCH_HELIOS_ROOT"] = str(root)
++            command = [str(script), task, gpu, str(args.steps)]
++            if resume is not None:
++                command.append(f"resume={resume}")
++            process = subprocess.Popen(
++                command,
++                stdout=log_handle,
++                stderr=subprocess.STDOUT,
++                start_new_session=True,
++                env=env,
++            )
++            running[task] = (process, log_handle, gpu, time.time(), resume)
++            print(
++                f"[launch] task={task} gpu={gpu} pid={process.pid} resume={resume} "
++                f"log={log_path}",
++                flush=True,
++            )
++
++        time.sleep(5)
++        for task, (process, log_handle, gpu, started_at, resume) in list(running.items()):
++            return_code = process.poll()
++            if return_code is None:
++                continue
++            log_handle.close()
++            checkpoint = (
++                root
++                / "runs"
++                / task
++                / "checkpoints"
++                / "weights"
++                / f"step_{args.steps:06d}.pt"
++            )
++            succeeded = return_code == 0 and _checkpoint_is_complete(checkpoint)
++            results[task] = {
++                "return_code": return_code,
++                "gpu": gpu,
++                "status": "succeeded" if succeeded else "failed",
++                "checkpoint": str(checkpoint.resolve()) if succeeded else None,
++            }
++            task_receipt = {
++                "schema_version": "fastwam-rmbench-helios-training-task-v1",
++                "status": "succeeded" if succeeded else "failed",
++                "task": task,
++                "gpu": gpu,
++                "target_steps": args.steps,
++                "initialization_checkpoint": str(initialization),
++                "resumed_from_state": None if resume is None else str(resume),
++                "checkpoint": str(checkpoint.resolve()) if succeeded else None,
++                "return_code": return_code,
++                "started_at_unix": started_at,
++                "finished_at_unix": time.time(),
++            }
++            task_receipt_path = root / "runs" / task / "training_receipt.json"
++            task_receipt_path.parent.mkdir(parents=True, exist_ok=True)
++            task_receipt_path.write_text(
++                json.dumps(task_receipt, indent=2, sort_keys=True) + "\n",
++                encoding="utf-8",
++            )
++            del running[task]
++            print(f"[done] task={task} gpu={gpu} return_code={return_code}", flush=True)
++
++    receipt = {
++        "schema_version": "fastwam-rmbench-helios-training-suite-v1",
++        "steps": args.steps,
++        "initialization_checkpoint": str(initialization),
++        "tasks": list(args.tasks),
++        "results": results,
++        "succeeded": all(
++            value["return_code"] == 0 and value.get("checkpoint")
++            for value in results.values()
++        ),
++    }
++    receipt_path = root / "training_suite_receipt.json"
++    receipt_path.write_text(json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++    print(json.dumps(receipt, indent=2, sort_keys=True))
++    if not receipt["succeeded"]:
++        raise SystemExit(1)
++
++
++if __name__ == "__main__":
++    main()
+diff --git a/scripts/rmbench/prepare_helios_memory_data.py b/scripts/rmbench/prepare_helios_memory_data.py
+new file mode 100755
+index 0000000..d46c26c
+--- /dev/null
++++ b/scripts/rmbench/prepare_helios_memory_data.py
+@@ -0,0 +1,329 @@
++#!/usr/bin/env python3
++"""Index raw RMBench HDF5 data for canonical Helios MemoryFastWAM training."""
++
++from __future__ import annotations
++
++import argparse
++import hashlib
++import json
++import os
++import re
++import tempfile
++from pathlib import Path
++from typing import Any
++
++import h5py
++import numpy as np
++
++from fastwam.datasets.rmbench_memory_dataset import (
++    CAMERA_DATASETS,
++    CANONICAL_DIM,
++    EPISODE_SCHEMA_VERSION,
++    NORMALIZATION_SCHEMA_VERSION,
++    RMBENCH_ACTION_DIM,
++    RMBENCH_TO_CANONICAL,
++)
++
++
++OFFICIAL_TASKS = (
++    "observe_and_pickup",
++    "rearrange_blocks",
++    "put_back_block",
++    "swap_blocks",
++    "swap_T",
++    "battery_try",
++    "blocks_ranking_try",
++    "cover_blocks",
++    "press_button",
++)
++
++
++def _episode_index(path: Path) -> int:
++    match = re.fullmatch(r"episode(\d+)\.hdf5", path.name)
++    if match is None:
++        raise ValueError(f"Cannot parse RMBench episode index from {path}.")
++    return int(match.group(1))
++
++
++def _pick_instruction(value: Any) -> str | None:
++    if isinstance(value, str):
++        value = value.strip()
++        return value or None
++    if isinstance(value, list):
++        for item in value:
++            selected = _pick_instruction(item)
++            if selected:
++                return selected
++    return None
++
++
++def _load_instruction(setting_dir: Path, episode_index: int, instruction_type: str) -> str:
++    path = setting_dir / "instructions" / f"episode{episode_index}.json"
++    if not path.is_file():
++        raise FileNotFoundError(f"RMBench episode instruction not found: {path}")
++    with path.open("r", encoding="utf-8") as handle:
++        payload = json.load(handle)
++    instruction = _pick_instruction(payload.get(instruction_type))
++    if instruction is None:
++        fallback = "seen" if instruction_type == "unseen" else "unseen"
++        instruction = _pick_instruction(payload.get(fallback))
++    if instruction is None:
++        raise ValueError(f"No usable instruction in {path}.")
++    return instruction
++
++
++def _atomic_write(path: Path, content: str) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with tempfile.NamedTemporaryFile(
++        mode="w", encoding="utf-8", dir=path.parent, delete=False
++    ) as handle:
++        handle.write(content)
++        temp_path = Path(handle.name)
++    os.replace(temp_path, path)
++
++
++def _json_text(payload: Any) -> str:
++    return json.dumps(payload, ensure_ascii=False, indent=2, sort_keys=True) + "\n"
++
++
++def _jsonl_text(records: list[dict[str, Any]]) -> str:
++    return "".join(
++        json.dumps(record, ensure_ascii=False, sort_keys=True) + "\n" for record in records
++    )
++
++
++def _domain_name(task_name: str) -> str:
++    return f"rmbench:{task_name}:aloha-agilex:qpos-next-v1"
++
++
++def _canonical_stats(
++    *,
++    state_sum: np.ndarray,
++    state_sq_sum: np.ndarray,
++    action_sum: np.ndarray,
++    action_sq_sum: np.ndarray,
++    count: int,
++    minimum_std: float,
++) -> dict[str, Any]:
++    if count <= 0:
++        raise ValueError("Cannot build RMBench normalization from zero transitions.")
++
++    def one(sum_value: np.ndarray, sq_sum_value: np.ndarray) -> dict[str, Any]:
++        mean_raw = sum_value / count
++        variance_raw = np.maximum(sq_sum_value / count - mean_raw**2, 0.0)
++        std_raw = np.maximum(np.sqrt(variance_raw), minimum_std)
++        mean = np.zeros(CANONICAL_DIM, dtype=np.float64)
++        std = np.ones(CANONICAL_DIM, dtype=np.float64)
++        counts = np.zeros(CANONICAL_DIM, dtype=np.int64)
++        valid = np.zeros(CANONICAL_DIM, dtype=np.bool_)
++        slots = np.asarray(RMBENCH_TO_CANONICAL, dtype=np.int64)
++        mean[slots] = mean_raw
++        std[slots] = std_raw
++        counts[slots] = count
++        valid[slots] = True
++        return {
++            "count": counts.tolist(),
++            "mean": mean.tolist(),
++            "std": std.tolist(),
++            "valid_mask": valid.tolist(),
++        }
++
++    return {
++        "state": one(state_sum, state_sq_sum),
++        "action": one(action_sum, action_sq_sum),
++    }
++
++
++def prepare(args: argparse.Namespace) -> None:
++    data_root = args.data_root.expanduser().resolve()
++    output_root = args.output_root.expanduser().resolve()
++    tasks = tuple(args.tasks or OFFICIAL_TASKS)
++    if len(tasks) != len(set(tasks)):
++        raise SystemExit(f"Duplicate RMBench task names: {tasks}")
++
++    episode_records: list[dict[str, Any]] = []
++    task_instruction_order: list[str] = []
++    task_instruction_seen: set[str] = set()
++    stats_domains: dict[str, Any] = {}
++    task_receipts: dict[str, Any] = {}
++
++    for task_name in tasks:
++        setting_dir = data_root / task_name / args.setting
++        episode_paths = sorted(
++            (setting_dir / "data").glob("episode*.hdf5"), key=_episode_index
++        )
++        if args.max_episodes is not None:
++            episode_paths = episode_paths[: int(args.max_episodes)]
++        if not episode_paths:
++            raise FileNotFoundError(
++                f"No RMBench episodes for {task_name}/{args.setting} under {data_root}."
++            )
++
++        state_sum = np.zeros(RMBENCH_ACTION_DIM, dtype=np.float64)
++        state_sq_sum = np.zeros(RMBENCH_ACTION_DIM, dtype=np.float64)
++        action_sum = np.zeros(RMBENCH_ACTION_DIM, dtype=np.float64)
++        action_sq_sum = np.zeros(RMBENCH_ACTION_DIM, dtype=np.float64)
++        transition_count = 0
++        frame_count = 0
++        window_count = 0
++        lengths: list[int] = []
++        domain = _domain_name(task_name)
++
++        for hdf5_path in episode_paths:
++            source_episode_index = _episode_index(hdf5_path)
++            instruction = _load_instruction(
++                setting_dir, source_episode_index, args.instruction_type
++            )
++            with h5py.File(hdf5_path, "r") as handle:
++                raw_state = np.asarray(handle["joint_action/vector"], dtype=np.float64)
++                if raw_state.ndim != 2 or raw_state.shape[1] != RMBENCH_ACTION_DIM:
++                    raise ValueError(
++                        f"Expected joint_action/vector [T,{RMBENCH_ACTION_DIM}], got "
++                        f"{raw_state.shape} in {hdf5_path}."
++                    )
++                length = int(raw_state.shape[0])
++                if length < 81:
++                    raise ValueError(f"RMBench episode is shorter than 81 frames: {hdf5_path}")
++                for dataset_key in CAMERA_DATASETS.values():
++                    if dataset_key not in handle or len(handle[dataset_key]) != length:
++                        raise ValueError(
++                            f"Camera/action length mismatch for {dataset_key} in {hdf5_path}."
++                        )
++
++            state_values = raw_state[:-1]
++            action_values = raw_state[1:]
++            state_sum += state_values.sum(axis=0)
++            state_sq_sum += np.square(state_values).sum(axis=0)
++            action_sum += action_values.sum(axis=0)
++            action_sq_sum += np.square(action_values).sum(axis=0)
++            transition_count += length - 1
++            frame_count += length
++            window_count += length - 80
++            lengths.append(length)
++
++            if instruction not in task_instruction_seen:
++                task_instruction_seen.add(instruction)
++                task_instruction_order.append(instruction)
++            episode_records.append(
++                {
++                    "schema_version": EPISODE_SCHEMA_VERSION,
++                    "task_name": task_name,
++                    "source_episode_index": source_episode_index,
++                    "hdf5_path": os.path.relpath(hdf5_path, output_root),
++                    "instruction": instruction,
++                    "instruction_type": args.instruction_type,
++                    "length": length,
++                    "normalization_domain": domain,
++                    "action_semantics": "next_qpos",
++                    "camera_order": ["head", "left_wrist", "right_wrist"],
++                }
++            )
++
++        domain_stats = _canonical_stats(
++            state_sum=state_sum,
++            state_sq_sum=state_sq_sum,
++            action_sum=action_sum,
++            action_sq_sum=action_sq_sum,
++            count=transition_count,
++            minimum_std=args.minimum_std,
++        )
++        stats_domains[domain] = {
++            **domain_stats,
++            "datasets": ["RMBench"],
++            "embodiments": ["aloha-agilex"],
++            "episode_count": len(episode_paths),
++            "row_count": frame_count,
++            "selected_state_row_count": transition_count,
++            "selected_action_row_count": transition_count,
++            "window_count": window_count,
++            "task_name": task_name,
++        }
++        task_receipts[task_name] = {
++            "episode_count": len(episode_paths),
++            "frame_count": frame_count,
++            "transition_count": transition_count,
++            "window_count_81f": window_count,
++            "min_episode_frames": min(lengths),
++            "max_episode_frames": max(lengths),
++            "normalization_domain": domain,
++        }
++
++    normalization = {
++        "schema_version": NORMALIZATION_SCHEMA_VERSION,
++        "method": "zscore",
++        "minimum_std": args.minimum_std,
++        "scope": "rmbench_task_and_active_canonical_slot",
++        "row_selection": "state_t_and_next_qpos_t_plus_1",
++        "source_splits": [args.setting],
++        "source_training_modes": ["joint_video_action"],
++        "source_quality_tiers": ["official_demo_clean"],
++        "domains": stats_domains,
++    }
++    tasks_records = [
++        {"task_index": index, "task": instruction}
++        for index, instruction in enumerate(task_instruction_order)
++    ]
++    manifest_text = _jsonl_text(episode_records)
++    receipt = {
++        "schema_version": "fastwam-rmbench-helios-preparation-v1",
++        "data_root": str(data_root),
++        "output_root": str(output_root),
++        "setting": args.setting,
++        "instruction_type": args.instruction_type,
++        "official_protocol": (
++            tuple(tasks) == OFFICIAL_TASKS
++            and args.max_episodes is None
++            and args.setting == "demo_clean"
++            and args.instruction_type == "seen"
++        ),
++        "tasks": list(tasks),
++        "task_statistics": task_receipts,
++        "total_episodes": len(episode_records),
++        "total_frames": sum(value["frame_count"] for value in task_receipts.values()),
++        "total_windows_81f": sum(
++            value["window_count_81f"] for value in task_receipts.values()
++        ),
++        "canonical_dim": CANONICAL_DIM,
++        "active_canonical_slots": list(RMBENCH_TO_CANONICAL),
++        "timeline": {"state": 81, "action": 80, "video": 21, "video_stride": 4},
++        "memory": {"long": 8, "mid": 2, "short": 1, "target_leak": False},
++        "episode_manifest_sha256": hashlib.sha256(manifest_text.encode("utf-8")).hexdigest(),
++    }
++
++    meta = output_root / "meta"
++    _atomic_write(meta / "episodes.jsonl", manifest_text)
++    _atomic_write(meta / "tasks.jsonl", _jsonl_text(tasks_records))
++    _atomic_write(meta / "normalization_stats.json", _json_text(normalization))
++    _atomic_write(meta / "preparation_receipt.json", _json_text(receipt))
++    (output_root / "text_embeds").mkdir(parents=True, exist_ok=True)
++
++    print(_json_text(receipt), end="")
++
++
++def parse_args() -> argparse.Namespace:
++    parser = argparse.ArgumentParser()
++    parser.add_argument(
++        "--data-root",
++        type=Path,
++        default=Path("/public/interns/hubin/dataset/RMBench/data"),
++    )
++    parser.add_argument(
++        "--output-root",
++        type=Path,
++        default=Path("/public/interns/hubin/dataset/RMBench/fastwam_helios"),
++    )
++    parser.add_argument("--tasks", nargs="*", default=None)
++    parser.add_argument("--setting", default="demo_clean")
++    parser.add_argument("--instruction-type", choices=("seen", "unseen"), default="seen")
++    parser.add_argument("--max-episodes", type=int, default=None)
++    parser.add_argument("--minimum-std", type=float, default=1.0e-3)
++    args = parser.parse_args()
++    if args.max_episodes is not None and args.max_episodes <= 0:
++        parser.error("--max-episodes must be positive.")
++    if args.minimum_std <= 0:
++        parser.error("--minimum-std must be positive.")
++    return args
++
++
++if __name__ == "__main__":
++    prepare(parse_args())
+diff --git a/scripts/rmbench/requirements-eval-compat.txt b/scripts/rmbench/requirements-eval-compat.txt
+new file mode 100644
+index 0000000..2161420
+--- /dev/null
++++ b/scripts/rmbench/requirements-eval-compat.txt
+@@ -0,0 +1,2 @@
++# RMBench's bundled Curobo v0.7.8 still calls the legacy wp.torch namespace.
++warp-lang==1.8.0
+diff --git a/scripts/rmbench/summarize_rmbench_results.py b/scripts/rmbench/summarize_rmbench_results.py
+new file mode 100755
+index 0000000..21d51d1
+--- /dev/null
++++ b/scripts/rmbench/summarize_rmbench_results.py
+@@ -0,0 +1,340 @@
++#!/usr/bin/env python3
++"""Compare Helios MemoryFastWAM RMBench rollouts with the official table."""
++
++from __future__ import annotations
++
++import argparse
++import json
++import re
++from pathlib import Path
++from typing import Any
++
++from launch_rmbench_helios_training import _checkpoint_is_complete
++
++
++M1_TASKS = (
++    "observe_and_pickup",
++    "rearrange_blocks",
++    "put_back_block",
++    "swap_blocks",
++    "swap_T",
++)
++MN_TASKS = (
++    "battery_try",
++    "blocks_ranking_try",
++    "cover_blocks",
++    "press_button",
++)
++OFFICIAL_TASKS = (*M1_TASKS, *MN_TASKS)
++DISPLAY_NAMES = {
++    "observe_and_pickup": "Observe and Pick Up",
++    "rearrange_blocks": "Rearrange Blocks",
++    "put_back_block": "Put Back Block",
++    "swap_blocks": "Swap Blocks",
++    "swap_T": "Swap T",
++    "battery_try": "Battery Try",
++    "blocks_ranking_try": "Blocks Ranking Try",
++    "cover_blocks": "Cover Blocks",
++    "press_button": "Press Button",
++}
++
++OFFICIAL_BASELINES = {
++    "DP": [1, 0, 0, 11, 20, 10, 10, 0, 0],
++    "ACT": [1, 29, 0, 2, 2, 19, 0, 0, 0],
++    "Pi0.5": [9, 13, 11, 24, 15, 16, 6, 0, 0],
++    "X-VLA": [9, 13, 18, 16, 3, 26, 1, 2, 0],
++    "Mem-0 paper": [4, 89, 90, 67, 14, 28, 18, 68, 0],
++    # Publicly retrained checkpoints announced by RMBench on 2026-07-14.
++    "Mem-0 current": [3, 86, 100, 81, 13, 21, 15, 76, 2],
++}
++SOURCE_URLS = {
++    "project": "https://rmbench.github.io/",
++    "paper": "https://arxiv.org/abs/2603.01229",
++    "code": "https://github.com/robotwin-Platform/rmbench",
++    "current_m1_release": "https://huggingface.co/qiuly/Mem-0-m1mix-RMBench",
++    "current_mn_release": "https://huggingface.co/qiuly/Mem-0-mn-RMBench",
++}
++
++
++def _read_success_rate(path: Path) -> float:
++    text = path.read_text(encoding="utf-8")
++    candidates = []
++    for line in text.splitlines():
++        stripped = line.strip()
++        if re.fullmatch(r"(?:0(?:\.\d+)?|1(?:\.0+)?)", stripped):
++            candidates.append(float(stripped))
++    if not candidates:
++        raise ValueError(f"No [0,1] success rate found in {path}.")
++    return 100.0 * candidates[-1]
++
++
++def _result_from_receipt(receipt_root: Path, task: str, step: int) -> tuple[Path, dict[str, Any]]:
++    receipt_path = receipt_root / f"{task}.json"
++    if not receipt_path.is_file():
++        raise FileNotFoundError(f"RMBench evaluation receipt is missing: {receipt_path}")
++    receipt = json.loads(receipt_path.read_text(encoding="utf-8"))
++    checkpoint = Path(str(receipt.get("checkpoint", "")))
++    result = Path(str(receipt.get("result_path", "")))
++    progress_path = Path(str(receipt.get("progress_path", "")))
++    expected_name = f"step_{step:06d}.pt"
++    if (
++        receipt.get("status") != "succeeded"
++        or checkpoint.name != expected_name
++        or not _checkpoint_is_complete(checkpoint)
++        or not result.is_file()
++        or not progress_path.is_file()
++        or int((receipt.get("protocol") or {}).get("rollouts", -1)) != 100
++    ):
++        raise ValueError(
++            f"Invalid evaluation receipt for {task}: status={receipt.get('status')!r}, "
++            f"checkpoint={checkpoint}, result={result}, progress={progress_path}, "
++            f"expected={expected_name}"
++        )
++    progress = json.loads(progress_path.read_text(encoding="utf-8"))
++    identity = progress.get("identity") or {}
++    feasible_seeds = progress.get("expert_feasible_seeds") or []
++    successes = int(progress.get("successes", -1))
++    if (
++        progress.get("status") != "completed"
++        or int(progress.get("evaluated_rollouts", -1)) != 100
++        or int(identity.get("target_rollouts", -1)) != 100
++        or Path(str(identity.get("checkpoint", ""))).resolve() != checkpoint.resolve()
++        or len(feasible_seeds) != 100
++        or len(set(int(seed) for seed in feasible_seeds)) != 100
++        or not 0 <= successes <= 100
++        or abs(_read_success_rate(result) - successes) > 1e-6
++    ):
++        raise ValueError(
++            f"Invalid 100-rollout progress for {task}: progress={progress_path}, "
++            f"evaluated={progress.get('evaluated_rollouts')}, successes={successes}, "
++            f"feasible_seeds={len(feasible_seeds)}"
++        )
++    return result.resolve(), receipt
++
++
++def _average(values: dict[str, float], tasks: tuple[str, ...]) -> float | None:
++    selected = [values[task] for task in tasks if task in values]
++    return None if not selected else sum(selected) / len(selected)
++
++
++def _fmt(value: float | None) -> str:
++    return "pending" if value is None else f"{value:.1f}%"
++
++
++def _renderer_note(protocols: dict[str, Any]) -> str:
++    normalized: set[tuple[str, str, str, str, str]] = set()
++    for renderer in protocols.values():
++        if not isinstance(renderer, dict):
++            continue
++        normalized.add(
++            (
++                str(renderer.get("shader", "unknown")),
++                str(renderer.get("samples_per_pixel", "unknown")),
++                str(renderer.get("path_depth", "unknown")),
++                str(renderer.get("denoiser", "unknown")),
++                str(renderer.get("vulkan_device", "unknown")),
++            )
++        )
++    if not normalized:
++        return (
++            "- Renderer protocol is unavailable because no evaluation receipt was "
++            "loaded."
++        )
++
++    descriptions = [
++        f"{shader}, {samples} spp, depth {depth}, denoiser {denoiser}, device {device}"
++        for shader, samples, depth, denoiser, device in sorted(normalized)
++    ]
++    label = "Renderer receipt" if len(descriptions) == 1 else "Renderer receipts"
++    return (
++        f"- {label}: {'; '.join(descriptions)}. Official GPU rendering uses OIDN; "
++        "results from a different renderer are not pixel-equivalent."
++    )
++
++
++def summarize(args: argparse.Namespace) -> dict[str, Any]:
++    receipt_root = args.receipt_root.expanduser().resolve()
++    explicit: dict[str, Path] = {}
++    for value in args.result:
++        task, separator, path = value.partition("=")
++        if not separator or task not in OFFICIAL_TASKS:
++            raise SystemExit(f"--result must be task=/path for an official task, got {value!r}.")
++        explicit[task] = Path(path).expanduser().resolve()
++
++    fastwam: dict[str, float] = {}
++    result_paths: dict[str, str] = {}
++    evaluation_receipts: dict[str, dict[str, Any]] = {}
++    for task in OFFICIAL_TASKS:
++        path = explicit.get(task)
++        if path is None:
++            try:
++                path, receipt = _result_from_receipt(receipt_root, task, args.step)
++                evaluation_receipts[task] = receipt
++            except (FileNotFoundError, ValueError):
++                if args.allow_partial:
++                    continue
++                raise
++        fastwam[task] = _read_success_rate(path)
++        result_paths[task] = str(path)
++    missing = [task for task in OFFICIAL_TASKS if task not in fastwam]
++    if missing and not args.allow_partial:
++        raise SystemExit(f"Missing official RMBench results for: {', '.join(missing)}")
++
++    rows = []
++    for index, task in enumerate(OFFICIAL_TASKS):
++        baselines = {
++            policy: values[index] for policy, values in OFFICIAL_BASELINES.items()
++        }
++        score = fastwam.get(task)
++        best_baseline = max(baselines.values())
++        rows.append(
++            {
++                "task": task,
++                "display_name": DISPLAY_NAMES[task],
++                "tmc": "M(1)" if task in M1_TASKS else "M(n)",
++                "fastwam": score,
++                "official_baselines": baselines,
++                "best_official_baseline": best_baseline,
++                "delta_vs_best_baseline": None if score is None else score - best_baseline,
++                "delta_vs_mem0_paper": (
++                    None if score is None else score - baselines["Mem-0 paper"]
++                ),
++                "delta_vs_mem0_current": (
++                    None if score is None else score - baselines["Mem-0 current"]
++                ),
++            }
++        )
++
++    averages = {
++        "fastwam_m1": _average(fastwam, M1_TASKS),
++        "fastwam_mn": _average(fastwam, MN_TASKS),
++        "fastwam_total": _average(fastwam, OFFICIAL_TASKS),
++        "official": {
++            policy: {
++                "m1": sum(values[: len(M1_TASKS)]) / len(M1_TASKS),
++                "mn": sum(values[len(M1_TASKS) :]) / len(MN_TASKS),
++                "total": sum(values) / len(OFFICIAL_TASKS),
++            }
++            for policy, values in OFFICIAL_BASELINES.items()
++        },
++    }
++    renderer_protocols = {
++        task: receipt.get("protocol", {}).get("renderer")
++        for task, receipt in evaluation_receipts.items()
++    }
++    payload = {
++        "schema_version": "fastwam-rmbench-leaderboard-comparison-v2",
++        "metric": "closed_loop_success_rate_percent",
++        "training_protocol": "task_specific_50_demo_clean_episodes",
++        "training_budget": {
++            "initialization": "tianji_helios_memory_fastwam_2500_steps",
++            "fine_tune_steps_per_task": args.step,
++            "paper_mem0": {
++                "iterations_per_task": 30000,
++                "global_batch_size": 448,
++                "gpus": "8xA800",
++            },
++            "current_mem0_release": {
++                "release_date": "2026-07-14",
++                "m1": "one five-task m1_mix checkpoint, 50000 steps, batch 56",
++                "mn": "four task-specific checkpoints, 30000 steps per task",
++            },
++            "budget_or_organization_matched_to_mem0": False,
++        },
++        "evaluation_protocol": "100_expert-feasible_rollouts_per_task_seed0_unseen_instruction",
++        "evaluation_receipts": {
++            task: str((receipt_root / f"{task}.json").resolve())
++            for task in evaluation_receipts
++        },
++        "renderer_protocols": renderer_protocols,
++        "source_urls": SOURCE_URLS,
++        "result_paths": result_paths,
++        "missing_tasks": missing,
++        "rows": rows,
++        "averages": averages,
++    }
++
++    output_json = args.output_json.expanduser().resolve()
++    output_md = args.output_md.expanduser().resolve()
++    output_json.parent.mkdir(parents=True, exist_ok=True)
++    output_md.parent.mkdir(parents=True, exist_ok=True)
++    output_json.write_text(json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8")
++
++    lines = [
++        "# RMBench Helios MemoryFastWAM Comparison",
++        "",
++        "Metric: closed-loop success rate, 100 expert-feasible rollouts per task.",
++        "",
++        "| Task | TMC | Helios FastWAM | DP | ACT | Pi0.5 | X-VLA | Mem-0 paper | Mem-0 current | Delta vs best official |",
++        "| --- | --- | ---: | ---: | ---: | ---: | ---: | ---: | ---: | ---: |",
++    ]
++    for row in rows:
++        baseline = row["official_baselines"]
++        lines.append(
++            f"| {row['display_name']} | {row['tmc']} | {_fmt(row['fastwam'])} | "
++            f"{baseline['DP']:.0f}% | {baseline['ACT']:.0f}% | {baseline['Pi0.5']:.0f}% | "
++            f"{baseline['X-VLA']:.0f}% | {baseline['Mem-0 paper']:.0f}% | "
++            f"{baseline['Mem-0 current']:.0f}% | "
++            f"{_fmt(row['delta_vs_best_baseline'])} |"
++        )
++    lines.extend(
++        [
++            "",
++            f"- Helios FastWAM M(1) average: {_fmt(averages['fastwam_m1'])}",
++            f"- Helios FastWAM M(n) average: {_fmt(averages['fastwam_mn'])}",
++            f"- Helios FastWAM total average: {_fmt(averages['fastwam_total'])}",
++            "- Mem-0 paper averages: 52.8% M(1), 28.5% M(n), 42.0% total.",
++            "- Current public Mem-0 release averages (2026-07-14): 56.6% M(1), "
++            "28.5% M(n), 44.1% total.",
++            "- Best non-Mem-0 official total average: Pi0.5 at 10.4%.",
++            f"- Helios FastWAM uses the 2,500-step Tianji memory initialization and {args.step:,} "
++            "fine-tune steps per task. It matches neither the paper Mem-0 budget (30K iterations, "
++            "global batch 448) nor the current M(1) joint-training organization, so this is not "
++            "a budget- or organization-matched comparison.",
++            _renderer_note(renderer_protocols),
++            "",
++            "Sources: [project page](https://rmbench.github.io/), "
++            "[paper](https://arxiv.org/abs/2603.01229), "
++            "[official code](https://github.com/robotwin-Platform/rmbench), "
++            "[current M(1) release](https://huggingface.co/qiuly/Mem-0-m1mix-RMBench), "
++            "[current M(n) release](https://huggingface.co/qiuly/Mem-0-mn-RMBench).",
++        ]
++    )
++    output_md.write_text("\n".join(lines) + "\n", encoding="utf-8")
++    return payload
++
++
++def parse_args() -> argparse.Namespace:
++    default_root = Path("/public/interns/hubin/dataset/RMBench/fastwam_helios")
++    parser = argparse.ArgumentParser()
++    parser.add_argument(
++        "--eval-root",
++        type=Path,
++        default=Path("/public/interns/hubin/code/RMBench/eval_result"),
++    )
++    parser.add_argument(
++        "--receipt-root",
++        type=Path,
++        default=default_root / "evaluation" / "receipts",
++    )
++    parser.add_argument("--step", type=int, default=2500)
++    parser.add_argument("--result", action="append", default=[])
++    parser.add_argument("--allow-partial", action="store_true")
++    parser.add_argument(
++        "--output-json",
++        type=Path,
++        default=default_root / "evaluation" / "leaderboard_comparison.json",
++    )
++    parser.add_argument(
++        "--output-md",
++        type=Path,
++        default=default_root / "evaluation" / "leaderboard_comparison.md",
++    )
++    args = parser.parse_args()
++    if args.step <= 0:
++        parser.error("--step must be positive")
++    return args
++
++
++if __name__ == "__main__":
++    print(json.dumps(summarize(parse_args()), indent=2, sort_keys=True))
+diff --git a/scripts/rmbench/train_rmbench_helios.sh b/scripts/rmbench/train_rmbench_helios.sh
+new file mode 100755
+index 0000000..0a6cfe5
+--- /dev/null
++++ b/scripts/rmbench/train_rmbench_helios.sh
+@@ -0,0 +1,36 @@
++#!/usr/bin/env bash
++set -euo pipefail
++
++FASTWAM_ROOT="$(cd "$(dirname "${BASH_SOURCE[0]}")/../.." && pwd)"
++FASTWAM_PYTHON="${FASTWAM_PYTHON:-/public/interns/hubin/code/hubin/miniforge3/envs/fastwam/bin/python3.10}"
++RMBENCH_HELIOS_ROOT="${RMBENCH_HELIOS_ROOT:-/public/interns/hubin/dataset/RMBench/fastwam_helios}"
++
++if [[ $# -lt 2 ]]; then
++  echo "Usage: $0 <task_name> <gpu_id> [max_steps] [hydra overrides ...]" >&2
++  exit 1
++fi
++
++TASK_NAME="$1"
++GPU_ID="$2"
++MAX_STEPS="${3:-2500}"
++if [[ $# -ge 3 ]]; then
++  shift 3
++else
++  shift 2
++fi
++
++OUTPUT_DIR="${RMBENCH_HELIOS_ROOT}/runs/${TASK_NAME}"
++mkdir -p "${OUTPUT_DIR}"
++
++cd "${FASTWAM_ROOT}"
++export CUDA_VISIBLE_DEVICES="${GPU_ID}"
++export RMBENCH_TASK_NAME="${TASK_NAME}"
++export RMBENCH_HELIOS_ROOT
++export PYTHONPATH="${FASTWAM_ROOT}/src:${FASTWAM_ROOT}:${PYTHONPATH:-}"
++export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-${FASTWAM_ROOT}/checkpoints}"
++
++exec "${FASTWAM_PYTHON}" scripts/train.py \
++  task=rmbench_helios_memory_finetune \
++  "output_dir=${OUTPUT_DIR}" \
++  "max_steps=${MAX_STEPS}" \
++  "$@"
 diff --git a/scripts/validate_memory_inference.py b/scripts/validate_memory_inference.py
 new file mode 100644
 index 0000000..cc09bf8
@@ -3214,12 +5478,514 @@ index 0000000..e4e3b74
 +            selection.progress, dtype=torch.float32, device=first.device
 +        ),
 +    }
+diff --git a/src/fastwam/datasets/rmbench_memory_dataset.py b/src/fastwam/datasets/rmbench_memory_dataset.py
+new file mode 100644
+index 0000000..0207c6b
+--- /dev/null
++++ b/src/fastwam/datasets/rmbench_memory_dataset.py
+@@ -0,0 +1,496 @@
++from __future__ import annotations
++
++import hashlib
++import io
++import json
++import os
++from collections import OrderedDict
++from dataclasses import dataclass
++from pathlib import Path
++from typing import Any, Sequence
++
++import h5py
++import numpy as np
++import torch
++import torchvision.transforms.functional as transforms_F
++from PIL import Image
++
++from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
++from fastwam.datasets.memory_bank import (
++    normalize_history_sizes,
++    select_multiscale_history_indices,
++)
++from fastwam.utils.logging_config import get_logger
++
++
++logger = get_logger(__name__)
++
++EPISODE_SCHEMA_VERSION = "fastwam-rmbench-episode-v1"
++NORMALIZATION_SCHEMA_VERSION = "fastwam-canonical-normalization-v1"
++CANONICAL_DIM = 80
++RMBENCH_ACTION_DIM = 14
++
++CAMERA_DATASETS = {
++    "global": "observation/head_camera/rgb",
++    "left_wrist": "observation/left_camera/rgb",
++    "right_wrist": "observation/right_camera/rgb",
++}
++
++# Aloha-AgileX stores [left arm 6, left gripper, right arm 6, right gripper].
++# The canonical FastWAM layout reserves 7 joint slots per arm and uses slots 6/13
++# for the grippers.
++RMBENCH_TO_CANONICAL = (
++    14,
++    15,
++    16,
++    17,
++    18,
++    19,
++    6,
++    21,
++    22,
++    23,
++    24,
++    25,
++    26,
++    13,
++)
++
++
++@dataclass(frozen=True)
++class _Episode:
++    task_name: str
++    source_episode_index: int
++    hdf5_path: Path
++    instruction: str
++    length: int
++    normalization_domain: str
++
++
++@dataclass(frozen=True)
++class _Sample:
++    episode_index: int
++    start: int
++
++
++def rmbench_to_canonical(values: np.ndarray) -> np.ndarray:
++    values = np.asarray(values, dtype=np.float32)
++    if values.shape[-1] != RMBENCH_ACTION_DIM:
++        raise ValueError(
++            f"RMBench Aloha vector must end in {RMBENCH_ACTION_DIM} dims, got {values.shape}."
++        )
++    output = np.zeros((*values.shape[:-1], CANONICAL_DIM), dtype=np.float32)
++    output[..., list(RMBENCH_TO_CANONICAL)] = values
++    return output
++
++
++def canonical_to_rmbench(values: np.ndarray) -> np.ndarray:
++    values = np.asarray(values, dtype=np.float32)
++    if values.shape[-1] != CANONICAL_DIM:
++        raise ValueError(f"Canonical vector must end in {CANONICAL_DIM} dims, got {values.shape}.")
++    return np.asarray(values[..., list(RMBENCH_TO_CANONICAL)], dtype=np.float32)
++
++
++def canonical_valid_mask() -> np.ndarray:
++    mask = np.zeros(CANONICAL_DIM, dtype=np.bool_)
++    mask[list(RMBENCH_TO_CANONICAL)] = True
++    return mask
++
++
++def _decode_jpeg(payload: Any, *, jpeg_color_mode: str) -> np.ndarray:
++    raw = payload.tobytes() if isinstance(payload, np.ndarray) else bytes(payload)
++    raw = raw.rstrip(b"\x00")
++    with Image.open(io.BytesIO(raw)) as image:
++        rgb = np.asarray(image.convert("RGB"), dtype=np.uint8)
++    if jpeg_color_mode == "opencv":
++        # RMBench calls cv2.imencode on arrays returned by get_obs(). Flipping the
++        # PIL decode reproduces the numeric RGB arrays consumed by the simulator.
++        rgb = rgb[..., ::-1].copy()
++    return np.array(rgb, dtype=np.uint8, copy=True, order="C")
++
++
++class RMBenchMemoryDataset(torch.utils.data.Dataset):
++    """Direct RMBench HDF5 loader for canonical-80D Helios MemoryFastWAM.
++
++    A sample contains 81 control states, 80 next-qpos targets, 21 video frames
++    sampled at offsets 0,4,...,80, and leak-free 8/2/1 observations strictly
++    before the current window. No intermediate video dataset is materialized.
++    """
++
++    def __init__(
++        self,
++        dataset_dirs: str | Sequence[str],
++        normalization_stats: str,
++        text_embedding_cache_dir: str,
++        tasks: str | Sequence[str] | None = None,
++        manifest_path: str | None = None,
++        context_len: int = 128,
++        action_dim: int = CANONICAL_DIM,
++        proprio_dim: int = CANONICAL_DIM,
++        num_frames: int = 81,
++        action_video_freq_ratio: int = 4,
++        video_size: Sequence[int] = (384, 320),
++        sample_stride: int = 1,
++        sample_offset: int = 0,
++        max_samples: int | None = None,
++        max_samples_per_episode: int | None = None,
++        normalization_clip: float | None = 10.0,
++        memory_history_long: int = 8,
++        memory_history_mid: int = 2,
++        memory_history_short: int = 1,
++        hdf5_cache_size: int = 2,
++        jpeg_color_mode: str = "opencv",
++    ) -> None:
++        super().__init__()
++        if isinstance(dataset_dirs, (str, os.PathLike)):
++            dataset_dirs = [str(dataset_dirs)]
++        roots = [Path(value).expanduser().resolve() for value in dataset_dirs]
++        if len(roots) != 1:
++            raise ValueError(f"RMBenchMemoryDataset requires one prepared root, got {roots}.")
++        self.prepared_root = roots[0]
++        self.manifest_path = (
++            Path(manifest_path).expanduser().resolve()
++            if manifest_path is not None
++            else self.prepared_root / "meta" / "episodes.jsonl"
++        )
++        self.normalization_stats_path = Path(normalization_stats).expanduser().resolve()
++        self.text_embedding_cache_dir = Path(text_embedding_cache_dir).expanduser().resolve()
++        self.context_len = int(context_len)
++        self.action_dim = int(action_dim)
++        self.proprio_dim = int(proprio_dim)
++        self.num_frames = int(num_frames)
++        self.action_video_freq_ratio = int(action_video_freq_ratio)
++        self.video_size = tuple(int(value) for value in video_size)
++        self.normalization_clip = (
++            None if normalization_clip is None else float(normalization_clip)
++        )
++        self.memory_history_sizes = normalize_history_sizes(
++            {
++                "long": memory_history_long,
++                "mid": memory_history_mid,
++                "short": memory_history_short,
++            }
++        )
++        self.hdf5_cache_size = int(hdf5_cache_size)
++        self.jpeg_color_mode = str(jpeg_color_mode)
++        self._hdf5_cache: OrderedDict[str, h5py.File] = OrderedDict()
++        self._hdf5_cache_pid = os.getpid()
++
++        if self.action_dim != CANONICAL_DIM or self.proprio_dim != CANONICAL_DIM:
++            raise ValueError(
++                "RMBench Helios training uses canonical 80D action/proprio, got "
++                f"action_dim={self.action_dim}, proprio_dim={self.proprio_dim}."
++            )
++        if self.num_frames != 81:
++            raise ValueError(f"Helios RMBench contract requires num_frames=81, got {self.num_frames}.")
++        if self.action_video_freq_ratio != 4:
++            raise ValueError(
++                "Helios RMBench contract requires action_video_freq_ratio=4, got "
++                f"{self.action_video_freq_ratio}."
++            )
++        if self.video_size != (384, 320):
++            raise ValueError(f"RMBench composite must be 384x320, got {self.video_size}.")
++        if sample_stride <= 0 or sample_offset < 0:
++            raise ValueError("sample_stride must be positive and sample_offset non-negative.")
++        if max_samples is not None and int(max_samples) <= 0:
++            raise ValueError("max_samples must be positive when provided.")
++        if max_samples_per_episode is not None and int(max_samples_per_episode) <= 0:
++            raise ValueError("max_samples_per_episode must be positive when provided.")
++        if self.hdf5_cache_size < 0:
++            raise ValueError("hdf5_cache_size must be non-negative.")
++        if self.jpeg_color_mode not in {"opencv", "rgb"}:
++            raise ValueError("jpeg_color_mode must be `opencv` or `rgb`.")
++
++        task_filter = None
++        if tasks is not None:
++            task_values = [tasks] if isinstance(tasks, str) else tasks
++            task_filter = {str(value) for value in task_values}
++        self.episodes = self._load_episodes(task_filter)
++        self._normalization = self._load_normalization(self.normalization_stats_path)
++
++        samples: list[_Sample] = []
++        for episode_index, episode in enumerate(self.episodes):
++            starts = list(range(max(0, episode.length - self.num_frames + 1)))
++            if max_samples_per_episode is not None:
++                starts = starts[: int(max_samples_per_episode)]
++            samples.extend(_Sample(episode_index, start) for start in starts)
++        samples = samples[int(sample_offset) :: int(sample_stride)]
++        if max_samples is not None:
++            samples = samples[: int(max_samples)]
++        if not samples:
++            raise ValueError("No RMBench 81-frame windows remain after filtering.")
++        self.samples = samples
++        self.sample_group_ids = tuple(
++            self.episodes[sample.episode_index].task_name for sample in self.samples
++        )
++        self.sample_episode_ids = tuple(
++            f"{self.episodes[sample.episode_index].task_name}:"
++            f"{self.episodes[sample.episode_index].source_episode_index:06d}"
++            for sample in self.samples
++        )
++
++        logger.info(
++            "Loaded RMBench Helios dataset: tasks=%s episodes=%d windows=%d video=21 action=80 memory=8/2/1",
++            sorted({episode.task_name for episode in self.episodes}),
++            len(self.episodes),
++            len(self.samples),
++        )
++
++    def _load_episodes(self, task_filter: set[str] | None) -> list[_Episode]:
++        if not self.manifest_path.is_file():
++            raise FileNotFoundError(f"RMBench episode manifest not found: {self.manifest_path}")
++        episodes: list[_Episode] = []
++        with self.manifest_path.open("r", encoding="utf-8") as handle:
++            for line_number, line in enumerate(handle, start=1):
++                if not line.strip():
++                    continue
++                record = json.loads(line)
++                if record.get("schema_version") != EPISODE_SCHEMA_VERSION:
++                    raise ValueError(
++                        f"Unsupported RMBench episode schema at {self.manifest_path}:{line_number}: "
++                        f"{record.get('schema_version')!r}"
++                    )
++                task_name = str(record["task_name"])
++                if task_filter is not None and task_name not in task_filter:
++                    continue
++                hdf5_path = Path(str(record["hdf5_path"])).expanduser()
++                if not hdf5_path.is_absolute():
++                    hdf5_path = self.prepared_root / hdf5_path
++                hdf5_path = hdf5_path.resolve()
++                if not hdf5_path.is_file():
++                    raise FileNotFoundError(f"RMBench HDF5 file not found: {hdf5_path}")
++                episodes.append(
++                    _Episode(
++                        task_name=task_name,
++                        source_episode_index=int(record["source_episode_index"]),
++                        hdf5_path=hdf5_path,
++                        instruction=str(record["instruction"]),
++                        length=int(record["length"]),
++                        normalization_domain=str(record["normalization_domain"]),
++                    )
++                )
++        if not episodes:
++            raise ValueError(
++                f"No RMBench episodes match tasks={None if task_filter is None else sorted(task_filter)}."
++            )
++        return episodes
++
++    @staticmethod
++    def _load_normalization(path: Path) -> dict[str, Any]:
++        if not path.is_file():
++            raise FileNotFoundError(f"RMBench normalization stats not found: {path}")
++        with path.open("r", encoding="utf-8") as handle:
++            payload = json.load(handle)
++        if payload.get("schema_version") != NORMALIZATION_SCHEMA_VERSION:
++            raise ValueError(f"Unsupported normalization schema: {payload.get('schema_version')!r}")
++        if payload.get("method") != "zscore" or not payload.get("domains"):
++            raise ValueError("RMBench normalization must contain non-empty zscore domains.")
++        return payload
++
++    def _domain_stats(self, episode: _Episode, kind: str) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
++        payload = (self._normalization["domains"].get(episode.normalization_domain) or {}).get(kind)
++        if payload is None:
++            raise KeyError(
++                f"Missing {kind} stats for domain={episode.normalization_domain} in "
++                f"{self.normalization_stats_path}."
++            )
++        mean = np.asarray(payload["mean"], dtype=np.float32)
++        std = np.asarray(payload["std"], dtype=np.float32)
++        valid = np.asarray(payload["valid_mask"], dtype=np.bool_)
++        if mean.shape != (CANONICAL_DIM,) or std.shape != (CANONICAL_DIM,) or valid.shape != (
++            CANONICAL_DIM,
++        ):
++            raise ValueError(f"Malformed canonical {kind} stats for {episode.normalization_domain}.")
++        if not np.isfinite(mean).all() or not np.isfinite(std).all() or (std <= 0).any():
++            raise ValueError(f"Invalid canonical {kind} stats for {episode.normalization_domain}.")
++        return mean, std, valid
++
++    def _normalize(self, values: np.ndarray, episode: _Episode, kind: str) -> torch.Tensor:
++        mean, std, valid = self._domain_stats(episode, kind)
++        output = (values - mean[None, :]) / std[None, :]
++        if self.normalization_clip is not None:
++            output = np.clip(output, -self.normalization_clip, self.normalization_clip)
++        output[:, ~valid] = 0.0
++        if not np.isfinite(output).all():
++            raise ValueError(
++                f"Non-finite normalized {kind} in {episode.task_name}/"
++                f"episode{episode.source_episode_index}."
++            )
++        return torch.from_numpy(np.ascontiguousarray(output, dtype=np.float32))
++
++    def _reset_hdf5_cache_after_fork(self) -> None:
++        pid = os.getpid()
++        if pid == self._hdf5_cache_pid:
++            return
++        self._hdf5_cache.clear()
++        self._hdf5_cache_pid = pid
++
++    def _open_hdf5(self, path: Path) -> h5py.File:
++        self._reset_hdf5_cache_after_fork()
++        key = str(path)
++        cached = self._hdf5_cache.pop(key, None)
++        if cached is not None:
++            self._hdf5_cache[key] = cached
++            return cached
++        handle = h5py.File(path, "r")
++        if self.hdf5_cache_size == 0:
++            return handle
++        self._hdf5_cache[key] = handle
++        while len(self._hdf5_cache) > self.hdf5_cache_size:
++            _, old = self._hdf5_cache.popitem(last=False)
++            old.close()
++        return handle
++
++    @staticmethod
++    def _validate_hdf5(handle: h5py.File, episode: _Episode) -> None:
++        state = handle.get("joint_action/vector")
++        if state is None or tuple(state.shape) != (episode.length, RMBENCH_ACTION_DIM):
++            raise ValueError(
++                f"RMBench state shape mismatch in {episode.hdf5_path}: "
++                f"expected {(episode.length, RMBENCH_ACTION_DIM)}, got "
++                f"{None if state is None else tuple(state.shape)}."
++            )
++        for key in CAMERA_DATASETS.values():
++            if key not in handle or len(handle[key]) != episode.length:
++                raise ValueError(f"RMBench camera length mismatch for {key} in {episode.hdf5_path}.")
++
++    def _compose_video(self, handle: h5py.File, indices: Sequence[int]) -> torch.Tensor:
++        unique_indices = list(dict.fromkeys(int(index) for index in indices))
++        decoded: dict[str, dict[int, torch.Tensor]] = {}
++        for camera_name, dataset_key in CAMERA_DATASETS.items():
++            dataset = handle[dataset_key]
++            decoded[camera_name] = {
++                index: torch.from_numpy(
++                    _decode_jpeg(dataset[index], jpeg_color_mode=self.jpeg_color_mode)
++                ).permute(2, 0, 1)
++                for index in unique_indices
++            }
++
++        def camera_batch(name: str) -> torch.Tensor:
++            return torch.stack([decoded[name][int(index)] for index in indices], dim=0)
++
++        global_video = transforms_F.resize(
++            camera_batch("global"),
++            size=[256, 320],
++            interpolation=transforms_F.InterpolationMode.BILINEAR,
++            antialias=True,
++        )
++        left_video = transforms_F.resize(
++            camera_batch("left_wrist"),
++            size=[128, 160],
++            interpolation=transforms_F.InterpolationMode.BILINEAR,
++            antialias=True,
++        )
++        right_video = transforms_F.resize(
++            camera_batch("right_wrist"),
++            size=[128, 160],
++            interpolation=transforms_F.InterpolationMode.BILINEAR,
++            antialias=True,
++        )
++        bottom = torch.cat([left_video, right_video], dim=-1)
++        video = torch.cat([global_video, bottom], dim=-2).to(torch.float32)
++        video = video.mul_(2.0 / 255.0).sub_(1.0)
++        return video.permute(1, 0, 2, 3).contiguous()
++
++    def _get_cached_text_context(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
++        digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
++        path = self.text_embedding_cache_dir / f"{digest}.t5_len{self.context_len}.wan22ti2v5b.pt"
++        if not path.is_file():
++            raise FileNotFoundError(
++                f"Missing RMBench text embedding cache: {path}. Run precompute_text_embeds.py first."
++            )
++        payload = torch.load(path, map_location="cpu", weights_only=True)
++        context = payload["context"]
++        context_mask = payload["mask"].bool()
++        if context.ndim != 2 or tuple(context.shape[:1]) != (self.context_len,):
++            raise ValueError(f"Malformed cached context in {path}: {tuple(context.shape)}")
++        if tuple(context_mask.shape) != (self.context_len,):
++            raise ValueError(f"Malformed cached context mask in {path}: {tuple(context_mask.shape)}")
++        context = context.clone()
++        context[~context_mask] = 0.0
++        return context, torch.ones_like(context_mask)
++
++    def __len__(self) -> int:
++        return len(self.samples)
++
++    def __getitem__(self, index: int) -> dict[str, Any]:
++        sample_ref = self.samples[index]
++        episode = self.episodes[sample_ref.episode_index]
++        start = sample_ref.start
++        handle = self._open_hdf5(episode.hdf5_path)
++        close_after = self.hdf5_cache_size == 0
++        try:
++            self._validate_hdf5(handle, episode)
++            raw_state = np.asarray(
++                handle["joint_action/vector"][start : start + self.num_frames],
++                dtype=np.float32,
++            )
++            proprio = self._normalize(rmbench_to_canonical(raw_state[:-1]), episode, "state")
++            action = self._normalize(rmbench_to_canonical(raw_state[1:]), episode, "action")
++
++            target_indices = list(
++                range(start, start + self.num_frames, self.action_video_freq_ratio)
++            )
++            selection = select_multiscale_history_indices(
++                start_index=0,
++                current_index=start,
++                end_index=episode.length,
++                history_sizes=self.memory_history_sizes,
++            )
++            memory_indices = selection.indices_all
++            combined = self._compose_video(handle, [*target_indices, *memory_indices])
++        finally:
++            if close_after:
++                handle.close()
++
++        video = combined[:, : len(target_indices)]
++        memory = combined[:, len(target_indices) :]
++        long_end = self.memory_history_sizes["long"]
++        mid_end = long_end + self.memory_history_sizes["mid"]
++        active = torch.from_numpy(canonical_valid_mask())
++        prompt = DEFAULT_PROMPT.format(task=episode.instruction)
++        context, context_mask = self._get_cached_text_context(prompt)
++
++        return {
++            "video": video,
++            "action": action,
++            "proprio": proprio,
++            "prompt": prompt,
++            "context": context,
++            "context_mask": context_mask,
++            "image_is_pad": torch.zeros(len(target_indices), dtype=torch.bool),
++            "action_is_pad": torch.zeros(self.num_frames - 1, dtype=torch.bool),
++            "proprio_is_pad": torch.zeros(self.num_frames - 1, dtype=torch.bool),
++            "action_dim_is_pad": ~active,
++            "proprio_dim_is_pad": ~active,
++            "proprio_condition_mask": torch.tensor(True),
++            "action_loss_mask": torch.tensor(True),
++            "video_loss_mask": torch.tensor(True),
++            "action_loss_weight": torch.tensor(1.0, dtype=torch.float32),
++            "video_loss_weight": torch.tensor(1.0, dtype=torch.float32),
++            "sample_weight": torch.tensor(1.0, dtype=torch.float32),
++            "memory_video_long": memory[:, :long_end],
++            "memory_video_mid": memory[:, long_end:mid_end],
++            "memory_video_short": memory[:, mid_end:],
++            "memory_mask_long": selection.mask_long,
++            "memory_mask_mid": selection.mask_mid,
++            "memory_mask_short": selection.mask_short,
++            "memory_indices_long": torch.tensor(selection.indices_long, dtype=torch.int64),
++            "memory_indices_mid": torch.tensor(selection.indices_mid, dtype=torch.int64),
++            "memory_indices_short": torch.tensor(selection.indices_short, dtype=torch.int64),
++            "memory_progress": torch.tensor(selection.progress, dtype=torch.float32),
++            "sample_index": torch.tensor(index, dtype=torch.int64),
++            "window_start": torch.tensor(start, dtype=torch.int64),
++            "source_episode_index": torch.tensor(
++                episode.source_episode_index, dtype=torch.int64
++            ),
++            "task_name": episode.task_name,
++            "normalization_domain": episode.normalization_domain,
++        }
++
++    def __del__(self) -> None:
++        for handle in getattr(self, "_hdf5_cache", {}).values():
++            try:
++                handle.close()
++            except Exception:
++                pass
 diff --git a/src/fastwam/datasets/training_case_dataset.py b/src/fastwam/datasets/training_case_dataset.py
 new file mode 100644
-index 0000000..2a5de55
+index 0000000..7c5fc0b
 --- /dev/null
 +++ b/src/fastwam/datasets/training_case_dataset.py
-@@ -0,0 +1,1174 @@
+@@ -0,0 +1,1195 @@
 +import hashlib
 +import io
 +import json
@@ -3312,16 +6078,37 @@ index 0000000..2a5de55
 +            raise ValueError(
 +                f"Unsupported camera rectification unmatched_policy={self.unmatched_policy!r}."
 +            )
++        provenance = payload.get("provenance") or {}
++        if not isinstance(provenance, dict):
++            raise ValueError("Camera rectification provenance must be an object.")
 +        self._grid_cache: dict[tuple[str, int, int, int, int], torch.Tensor] = {}
 +        self.metadata = {
 +            "schema_version": RECTIFICATION_SCHEMA_VERSION,
 +            "config_path": str(self.path),
 +            "config_sha256": hashlib.sha256(self.path.read_bytes()).hexdigest(),
++            "description": str(payload.get("description", "")),
++            "provenance": provenance,
 +            "profile_ids": sorted(self.profiles),
 +            "calibration_status": {
 +                profile_id: profile.calibration_status
 +                for profile_id, profile in sorted(self.profiles.items())
 +            },
++            "profiles": {
++                profile_id: {
++                    "model": profile.model,
++                    "image_size": list(profile.image_size),
++                    "camera_matrix": [list(row) for row in profile.camera_matrix],
++                    "distortion_coefficients": list(profile.distortion_coefficients),
++                    "virtual_horizontal_fov_degrees": profile.virtual_horizontal_fov_degrees,
++                }
++                for profile_id, profile in sorted(self.profiles.items())
++            },
++            "bindings": {
++                "source_key": dict(sorted(self.source_key_bindings.items())),
++                "role": dict(sorted(self.role_bindings.items())),
++            },
++            "default_profile": self.default_profile,
++            "unmatched_policy": self.unmatched_policy,
 +        }
 +
 +    def _parse_bindings(self, raw: Any, binding_type: str) -> dict[str, str]:
@@ -5916,10 +8703,10 @@ index 0000000..72d3b1e
 +    assert pair[0].size == (640, 416)
 diff --git a/tests/test_masked_losses.py b/tests/test_masked_losses.py
 new file mode 100644
-index 0000000..eb5da53
+index 0000000..694417e
 --- /dev/null
 +++ b/tests/test_masked_losses.py
-@@ -0,0 +1,142 @@
+@@ -0,0 +1,189 @@
 +import unittest
 +
 +import torch
@@ -5929,6 +8716,53 @@ index 0000000..eb5da53
 +
 +
 +class MaskedLossTest(unittest.TestCase):
++    def test_training_loss_uses_model_forward_wrapper(self):
++        class ForwardOnly(torch.nn.Module):
++            def __init__(self):
++                super().__init__()
++                self.called = False
++
++            def forward(self, sample):
++                self.called = True
++                return sample["loss"], {"loss_video": float(sample["loss"])}
++
++            def training_loss(self, sample):
++                raise AssertionError("training_loss must not bypass the wrapper")
++
++        model = ForwardOnly()
++        loss, metrics = Wan22Trainer._compute_training_loss_through_wrapper(
++            model, {"loss": torch.tensor(2.0)}
++        )
++
++        self.assertTrue(model.called)
++        self.assertEqual(float(loss), 2.0)
++        self.assertEqual(metrics, {"loss_video": 2.0})
++
++    def test_distributed_probe_shards_merge_in_probe_order(self):
++        shards = [
++            [
++                {"eval_probe_position": 0, "eval_index": 5},
++                {"eval_probe_position": 2, "eval_index": 180},
++            ],
++            [{"eval_probe_position": 1, "eval_index": 87}],
++        ]
++
++        trainer = Wan22Trainer.__new__(Wan22Trainer)
++        merged = trainer._merge_fixed_probe_result_shards(
++            shards, (5, 87, 180)
++        )
++
++        self.assertEqual(
++            [record["eval_index"] for record in merged], [5, 87, 180]
++        )
++
++    def test_distributed_probe_shards_reject_missing_probe(self):
++        with self.assertRaisesRegex(RuntimeError, "coverage mismatch"):
++            Wan22Trainer._merge_fixed_probe_result_shards(
++                [[{"eval_probe_position": 0, "eval_index": 5}]],
++                (5, 87),
++            )
++
 +    def test_action_loss_ignores_padded_steps_and_inactive_dimensions(self):
 +        pred = torch.zeros((2, 3, 4), dtype=torch.float32)
 +        target = torch.ones_like(pred)
@@ -6294,6 +9128,428 @@ index 0000000..d2a44d1
 +    assert tuple(pred_action.shape) == (1, 3, 4)
 +    assert torch.equal(returned_valid, memory_valid)
 +    assert torch.equal(video_expert.post_tokens, torch.full((1, 2, 4), 7.0))
+diff --git a/tests/test_rmbench_launchers.py b/tests/test_rmbench_launchers.py
+new file mode 100644
+index 0000000..8980d9f
+--- /dev/null
++++ b/tests/test_rmbench_launchers.py
+@@ -0,0 +1,90 @@
++import json
++import sys
++import zipfile
++from pathlib import Path
++
++
++SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts" / "rmbench"
++if str(SCRIPT_DIR) not in sys.path:
++    sys.path.insert(0, str(SCRIPT_DIR))
++
++from launch_rmbench_helios_training import (  # noqa: E402
++    _checkpoint_is_complete,
++    _latest_training_state,
++)
++from launch_rmbench_helios_evaluation import (  # noqa: E402
++    _available_slots,
++    _checkpoint,
++    _port_for_slot,
++)
++
++
++def _write_checkpoint(path: Path) -> None:
++    path.parent.mkdir(parents=True, exist_ok=True)
++    with zipfile.ZipFile(path, "w") as archive:
++        archive.writestr("archive/data.pkl", b"payload")
++        archive.writestr("archive/version", b"3\n")
++
++
++def _write_state(root: Path, task: str, step: int, *, complete: bool = True) -> Path:
++    path = root / "runs" / task / "checkpoints" / "state" / f"step_{step:06d}"
++    path.mkdir(parents=True)
++    (path / "trainer_state.json").write_text(
++        json.dumps({"global_step": step}), encoding="utf-8"
++    )
++    for name in ("model.safetensors", "optimizer.bin", "scheduler.bin"):
++        (path / name).write_bytes(b"complete")
++    if complete:
++        (path / "random_states_0.pkl").write_bytes(b"complete")
++    return path
++
++
++def test_checkpoint_archive_must_have_torch_payload_and_version(tmp_path: Path):
++    checkpoint = tmp_path / "step_002500.pt"
++    _write_checkpoint(checkpoint)
++    assert _checkpoint_is_complete(checkpoint)
++
++    truncated = tmp_path / "truncated.pt"
++    truncated.write_bytes(checkpoint.read_bytes()[:24])
++    assert not _checkpoint_is_complete(truncated)
++
++
++def test_latest_training_state_ignores_partial_and_final_state(tmp_path: Path):
++    valid = _write_state(tmp_path, "press_button", 500)
++    _write_state(tmp_path, "press_button", 1000, complete=False)
++    _write_state(tmp_path, "press_button", 2500)
++
++    assert _latest_training_state(tmp_path, "press_button", 2500) == valid.resolve()
++
++
++def test_evaluation_requires_the_exact_complete_checkpoint(tmp_path: Path):
++    earlier = (
++        tmp_path
++        / "runs"
++        / "press_button"
++        / "checkpoints"
++        / "weights"
++        / "step_002000.pt"
++    )
++    _write_checkpoint(earlier)
++    try:
++        _checkpoint(tmp_path, "press_button", 2500)
++    except FileNotFoundError as error:
++        assert "step 2500" in str(error)
++    else:
++        raise AssertionError("evaluation silently selected an earlier checkpoint")
++
++    exact = earlier.with_name("step_002500.pt")
++    _write_checkpoint(exact)
++    assert _checkpoint(tmp_path, "press_button", 2500) == exact.resolve()
++
++
++def test_multi_job_evaluation_spreads_first_wave_across_all_gpus():
++    gpus = [str(index) for index in range(8)]
++    slots = _available_slots(gpus, 2, occupied=set())
++    assert slots[:8] == [(gpu, 0) for gpu in gpus]
++    assert slots[8] == ("0", 1)
++    assert len(slots) == 16
++    assert len({_port_for_slot(19000, gpu, 2, slot) for gpu, slot in slots}) == 16
++    assert _port_for_slot(19000, "0", 2, 0) == 19000
++    assert _port_for_slot(19000, "7", 2, 1) == 19015
+diff --git a/tests/test_rmbench_memory_dataset.py b/tests/test_rmbench_memory_dataset.py
+new file mode 100644
+index 0000000..1259648
+--- /dev/null
++++ b/tests/test_rmbench_memory_dataset.py
+@@ -0,0 +1,197 @@
++import hashlib
++import io
++import json
++from pathlib import Path
++
++import h5py
++import numpy as np
++import torch
++from PIL import Image
++
++from fastwam.datasets.lerobot.robot_video_dataset import DEFAULT_PROMPT
++from fastwam.datasets.rmbench_memory_dataset import (
++    CANONICAL_DIM,
++    EPISODE_SCHEMA_VERSION,
++    NORMALIZATION_SCHEMA_VERSION,
++    RMBENCH_TO_CANONICAL,
++    RMBenchMemoryDataset,
++    canonical_to_rmbench,
++    canonical_valid_mask,
++    rmbench_to_canonical,
++)
++from experiments.robotwin.fastwam_policy.deploy_policy import _resize_rgb
++
++
++def _jpeg(frame: np.ndarray) -> np.ndarray:
++    buffer = io.BytesIO()
++    Image.fromarray(frame, mode="RGB").save(buffer, format="JPEG", quality=95)
++    return np.frombuffer(buffer.getvalue(), dtype=np.uint8)
++
++
++def _write_fixture(root: Path, *, length: int = 96) -> tuple[Path, Path]:
++    source = root / "source" / "episode0.hdf5"
++    source.parent.mkdir(parents=True)
++    with h5py.File(source, "w") as handle:
++        state = np.stack(
++            [np.arange(14, dtype=np.float32) / 100.0 + frame for frame in range(length)]
++        )
++        handle.create_dataset("joint_action/vector", data=state)
++        dtype = h5py.vlen_dtype(np.dtype("uint8"))
++        for camera_index, key in enumerate(
++            (
++                "observation/head_camera/rgb",
++                "observation/left_camera/rgb",
++                "observation/right_camera/rgb",
++            )
++        ):
++            dataset = handle.create_dataset(key, (length,), dtype=dtype)
++            for frame in range(length):
++                image = np.zeros((12, 16, 3), dtype=np.uint8)
++                image[..., camera_index] = frame
++                dataset[frame] = _jpeg(image)
++
++    prepared = root / "prepared"
++    meta = prepared / "meta"
++    meta.mkdir(parents=True)
++    instruction = "Complete the RMBench fixture task."
++    domain = "rmbench:fixture:aloha-agilex:qpos-next-v1"
++    record = {
++        "schema_version": EPISODE_SCHEMA_VERSION,
++        "task_name": "fixture",
++        "source_episode_index": 0,
++        "hdf5_path": str(source),
++        "instruction": instruction,
++        "length": length,
++        "normalization_domain": domain,
++    }
++    (meta / "episodes.jsonl").write_text(json.dumps(record) + "\n", encoding="utf-8")
++    (meta / "tasks.jsonl").write_text(
++        json.dumps({"task_index": 0, "task": instruction}) + "\n", encoding="utf-8"
++    )
++
++    valid = canonical_valid_mask()
++    kind = {
++        "count": (valid.astype(np.int64) * (length - 1)).tolist(),
++        "mean": np.zeros(CANONICAL_DIM).tolist(),
++        "std": np.ones(CANONICAL_DIM).tolist(),
++        "valid_mask": valid.tolist(),
++    }
++    stats = {
++        "schema_version": NORMALIZATION_SCHEMA_VERSION,
++        "method": "zscore",
++        "domains": {
++            domain: {
++                "task_name": "fixture",
++                "state": kind,
++                "action": kind,
++            }
++        },
++    }
++    stats_path = meta / "normalization_stats.json"
++    stats_path.write_text(json.dumps(stats), encoding="utf-8")
++
++    prompt = DEFAULT_PROMPT.format(task=instruction)
++    digest = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
++    cache = prepared / "text_embeds"
++    cache.mkdir()
++    torch.save(
++        {"context": torch.ones(128, 8), "mask": torch.ones(128, dtype=torch.bool)},
++        cache / f"{digest}.t5_len128.wan22ti2v5b.pt",
++    )
++    return prepared, stats_path
++
++
++def test_rmbench_canonical_mapping_round_trip():
++    raw = np.arange(28, dtype=np.float32).reshape(2, 14)
++    canonical = rmbench_to_canonical(raw)
++    assert canonical.shape == (2, 80)
++    assert np.array_equal(canonical_to_rmbench(canonical), raw)
++    assert np.count_nonzero(canonical_valid_mask()) == 14
++    assert np.array_equal(
++        canonical[..., list(RMBENCH_TO_CANONICAL)],
++        raw,
++    )
++
++
++def test_rmbench_deployment_resize_preserves_training_uint8_contract():
++    image = np.arange(17 * 23 * 3, dtype=np.uint8).reshape(17, 23, 3)
++    image.setflags(write=False)
++    resized = _resize_rgb(image, (160, 128))
++    expected = torch.nn.functional.interpolate(
++        torch.from_numpy(image.copy()).permute(2, 0, 1).unsqueeze(0).float(),
++        size=(128, 160),
++        mode="bilinear",
++        align_corners=False,
++        antialias=True,
++    ).round().clamp(0, 255).to(torch.uint8)[0].permute(1, 2, 0).numpy()
++    assert resized.dtype == np.uint8
++    assert resized.shape == (128, 160, 3)
++    assert np.max(np.abs(resized.astype(np.int16) - expected.astype(np.int16))) <= 1
++
++
++def test_rmbench_memory_dataset_uses_81_frames_and_past_only(tmp_path: Path):
++    prepared, stats = _write_fixture(tmp_path)
++    dataset = RMBenchMemoryDataset(
++        dataset_dirs=[str(prepared)],
++        normalization_stats=str(stats),
++        text_embedding_cache_dir=str(prepared / "text_embeds"),
++        tasks=["fixture"],
++        jpeg_color_mode="rgb",
++        hdf5_cache_size=0,
++        normalization_clip=None,
++    )
++    sample = dataset[12]
++
++    assert tuple(sample["video"].shape) == (3, 21, 384, 320)
++    assert tuple(sample["action"].shape) == (80, 80)
++    assert tuple(sample["proprio"].shape) == (80, 80)
++    assert tuple(sample["memory_video_long"].shape) == (3, 8, 384, 320)
++    assert tuple(sample["memory_video_mid"].shape) == (3, 2, 384, 320)
++    assert tuple(sample["memory_video_short"].shape) == (3, 1, 384, 320)
++    assert sample["memory_mask_long"].all()
++    assert sample["memory_mask_mid"].all()
++    assert sample["memory_mask_short"].all()
++
++    memory_indices = torch.cat(
++        [
++            sample["memory_indices_long"],
++            sample["memory_indices_mid"],
++            sample["memory_indices_short"],
++        ]
++    )
++    assert memory_indices.tolist() == list(range(1, 12))
++    assert int(memory_indices.max()) < int(sample["window_start"])
++
++    expected_action = np.arange(14, dtype=np.float32) / 100.0 + 13
++    assert np.allclose(
++        sample["action"][0, list(RMBENCH_TO_CANONICAL)].numpy(), expected_action
++    )
++    assert torch.count_nonzero(sample["action"][0, sample["action_dim_is_pad"]]) == 0
++
++
++def test_rmbench_memory_left_padding_is_masked(tmp_path: Path):
++    prepared, stats = _write_fixture(tmp_path)
++    dataset = RMBenchMemoryDataset(
++        dataset_dirs=str(prepared),
++        normalization_stats=str(stats),
++        text_embedding_cache_dir=str(prepared / "text_embeds"),
++        tasks="fixture",
++        jpeg_color_mode="rgb",
++        hdf5_cache_size=0,
++        max_samples=1,
++    )
++    sample = dataset[0]
++    assert not torch.cat(
++        [
++            sample["memory_mask_long"],
++            sample["memory_mask_mid"],
++            sample["memory_mask_short"],
++        ]
++    ).any()
++    assert torch.cat(
++        [
++            sample["memory_indices_long"],
++            sample["memory_indices_mid"],
++            sample["memory_indices_short"],
++        ]
++    ).tolist() == [0] * 11
+diff --git a/tests/test_rmbench_results.py b/tests/test_rmbench_results.py
+new file mode 100644
+index 0000000..f7ebf93
+--- /dev/null
++++ b/tests/test_rmbench_results.py
+@@ -0,0 +1,117 @@
++import json
++import sys
++import zipfile
++from pathlib import Path
++
++
++SCRIPT_DIR = Path(__file__).resolve().parents[1] / "scripts" / "rmbench"
++if str(SCRIPT_DIR) not in sys.path:
++    sys.path.insert(0, str(SCRIPT_DIR))
++
++from summarize_rmbench_results import (  # noqa: E402
++    M1_TASKS,
++    MN_TASKS,
++    OFFICIAL_BASELINES,
++    OFFICIAL_TASKS,
++    _renderer_note,
++    _result_from_receipt,
++)
++
++
++def test_official_mem0_baselines_preserve_paper_and_current_release():
++    paper = OFFICIAL_BASELINES["Mem-0 paper"]
++    current = OFFICIAL_BASELINES["Mem-0 current"]
++
++    assert len(paper) == len(OFFICIAL_TASKS)
++    assert len(current) == len(OFFICIAL_TASKS)
++    assert sum(paper[: len(M1_TASKS)]) / len(M1_TASKS) == 52.8
++    assert sum(paper[len(M1_TASKS) :]) / len(MN_TASKS) == 28.5
++    assert sum(paper) / len(OFFICIAL_TASKS) == 42.0
++    assert sum(current[: len(M1_TASKS)]) / len(M1_TASKS) == 56.6
++    assert sum(current[len(M1_TASKS) :]) / len(MN_TASKS) == 28.5
++    assert round(sum(current) / len(OFFICIAL_TASKS), 1) == 44.1
++
++
++def test_result_receipt_requires_requested_checkpoint_step(tmp_path: Path):
++    checkpoint = tmp_path / "step_002500.pt"
++    result = tmp_path / "_result.txt"
++    with zipfile.ZipFile(checkpoint, "w") as archive:
++        archive.writestr("archive/data.pkl", b"checkpoint")
++        archive.writestr("archive/version", b"3\n")
++    result.write_text("0.25\n", encoding="utf-8")
++    progress = tmp_path / "progress.json"
++    progress.write_text(
++        json.dumps(
++            {
++                "status": "completed",
++                "identity": {
++                    "checkpoint": str(checkpoint),
++                    "target_rollouts": 100,
++                },
++                "evaluated_rollouts": 100,
++                "successes": 25,
++                "expert_feasible_seeds": list(range(100000, 100100)),
++            }
++        ),
++        encoding="utf-8",
++    )
++    receipt_root = tmp_path / "receipts"
++    receipt_root.mkdir()
++    receipt = {
++        "status": "succeeded",
++        "checkpoint": str(checkpoint),
++        "result_path": str(result),
++        "progress_path": str(progress),
++        "protocol": {"rollouts": 100},
++    }
++    (receipt_root / "press_button.json").write_text(
++        json.dumps(receipt), encoding="utf-8"
++    )
++
++    selected, payload = _result_from_receipt(receipt_root, "press_button", 2500)
++    assert selected == result.resolve()
++    assert payload["protocol"]["rollouts"] == 100
++
++    progress_payload = json.loads(progress.read_text(encoding="utf-8"))
++    progress_payload["successes"] = 24
++    progress.write_text(json.dumps(progress_payload), encoding="utf-8")
++    try:
++        _result_from_receipt(receipt_root, "press_button", 2500)
++    except ValueError as error:
++        assert "Invalid 100-rollout progress" in str(error)
++    else:
++        raise AssertionError("result receipt accepted a score/count mismatch")
++    progress_payload["successes"] = 25
++    progress.write_text(json.dumps(progress_payload), encoding="utf-8")
++
++    try:
++        _result_from_receipt(receipt_root, "press_button", 2000)
++    except ValueError as error:
++        assert "step_002000.pt" in str(error)
++    else:
++        raise AssertionError("result receipt accepted the wrong checkpoint step")
++
++
++def test_renderer_note_uses_receipt_values_instead_of_defaults():
++    note = _renderer_note(
++        {
++            "press_button": {
++                "shader": "rt",
++                "samples_per_pixel": 1,
++                "path_depth": 1,
++                "denoiser": "none",
++                "vulkan_device": "Mesa lavapipe (CPU)",
++            },
++            "swap_T": {
++                "shader": "rt",
++                "samples_per_pixel": 1,
++                "path_depth": 1,
++                "denoiser": "none",
++                "vulkan_device": "Mesa lavapipe (CPU)",
++            },
++        }
++    )
++
++    assert "1 spp, depth 1" in note
++    assert "Mesa lavapipe (CPU)" in note
++    assert "32 spp" not in note
 diff --git a/tests/test_samplers.py b/tests/test_samplers.py
 new file mode 100644
 index 0000000..8d00b57
@@ -6363,10 +9619,10 @@ index 0000000..8d00b57
 +    assert list(sampler) == full_epoch[4:]
 diff --git a/tests/test_training_case_io.py b/tests/test_training_case_io.py
 new file mode 100644
-index 0000000..d2601d7
+index 0000000..cd3684d
 --- /dev/null
 +++ b/tests/test_training_case_io.py
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,150 @@
 +import io
 +import json
 +from pathlib import Path
@@ -6440,6 +9696,8 @@ index 0000000..d2601d7
 +        json.dumps(
 +            {
 +                "schema_version": "fastwam-camera-rectification-v1",
++                "description": "synthetic projection",
++                "provenance": {"source_document": "synthetic"},
 +                "profiles": {
 +                    "test": {
 +                        "model": "opencv_fisheye",
@@ -6482,6 +9740,10 @@ index 0000000..d2601d7
 +    assert tuple(rectified.shape) == (2, 3, 5, 7)
 +    torch.testing.assert_close(rectified[:, 0, 2, 3], torch.ones(2))
 +    assert registry.metadata["calibration_status"] == {"test": "synthetic_test"}
++    assert registry.metadata["provenance"] == {"source_document": "synthetic"}
++    assert registry.metadata["profiles"]["test"]["image_size"] == [9, 9]
++    assert registry.metadata["profiles"]["test"]["virtual_horizontal_fov_degrees"] == 100.0
++    assert registry.metadata["bindings"]["source_key"] == {"camera.test": "test"}
 +
 +
 +def test_camera_rectification_leaves_unbound_camera_as_identity_resize(tmp_path):

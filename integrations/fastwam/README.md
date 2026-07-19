@@ -1,14 +1,16 @@
 # FastWAM Code Integration
 
 This directory carries the code-only FastWAM integration required by the canonical
-`TrainingCaseV1`, 8/2/1 visual memory, fixed-probe evaluation, optional camera rectification, and
-the Tianji raw-fisheye dataset-overfit workflow.
+`TrainingCaseV1`, 8/2/1 visual memory, rank-sharded fixed-probe evaluation, optional camera
+rectification, the Tianji raw-fisheye dataset-overfit workflow, and the RMBench Helios-memory
+training/evaluation path. The trainer supports single-process execution and real PyTorch DDP
+through `torchrun` without bypassing the wrapped model during forward/backward.
 It contains no model weights, datasets, caches, or credentials.
 
 Current patch SHA256:
 
 ```text
-c97fa8bf3c7e840091e25686bebd9fdaeae4a1f00b5dd5b8540c188b76bb53e7
+abf45b9f55b86bdd4c244247afa505d2c549678055c33568550d31c23aad4fa0
 ```
 
 The patch is pinned to upstream FastWAM commit:
@@ -36,10 +38,13 @@ cd /path/to/FastWAM
 python -m pytest -q
 ```
 
-The current clean-checkout result is 27 passed tests. The suite includes the inference contract
-that keeps canonical padded action dimensions zero throughout flow-matching denoising,
-optional fisheye-to-pinhole mapping, and synchronized imagination/GT pair dimensions.
+The connected and clean-patch checkout result is 41 passed tests. The suite includes the inference contract that
+keeps canonical padded action dimensions zero throughout flow-matching denoising, optional
+fisheye-to-pinhole mapping, synchronized imagination/GT pair dimensions, DDP-safe wrapped model
+forward, complete ordered merging of rank-sharded fixed probes, and RMBench data/memory/result
+contracts. RMBench simulator-side changes are a separate pinned patch under
+[`integrations/rmbench/`](../rmbench/README.md).
 
 `scripts/export_fastwam_integration_patch.sh` regenerates the patch from the maintained local
-checkout. It intentionally exports only canonical data, memory model, trainer, scheduler, and
-their tests. RMBench experiments and all runtime artifacts are excluded.
+checkout. It exports only the explicit canonical-data, memory-model, trainer, RMBench and test
+whitelists. Runtime artifacts remain excluded.

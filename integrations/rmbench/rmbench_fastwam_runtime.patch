@@ -1,0 +1,359 @@
+diff --git a/envs/_base_task.py b/envs/_base_task.py
+index e0ea0d8..16b482f 100644
+--- a/envs/_base_task.py
++++ b/envs/_base_task.py
+@@ -217,10 +217,20 @@ class Base_Task(gym.Env):
+         # give renderer to sapien sim
+         self.engine.set_renderer(self.renderer)
+ 
+-        sapien.render.set_camera_shader_dir("rt")
+-        sapien.render.set_ray_tracing_samples_per_pixel(32)
+-        sapien.render.set_ray_tracing_path_depth(8)
+-        sapien.render.set_ray_tracing_denoiser("oidn")
++        render_shader = os.environ.get("RMBENCH_RENDER_SHADER", "rt")
++        sapien.render.set_camera_shader_dir(render_shader)
++        if render_shader == "rt":
++            ray_tracing_samples = int(os.environ.get("RMBENCH_RT_SAMPLES", "32"))
++            ray_tracing_path_depth = int(os.environ.get("RMBENCH_RT_PATH_DEPTH", "8"))
++            if ray_tracing_samples <= 0 or ray_tracing_path_depth <= 0:
++                raise ValueError(
++                    "RMBENCH_RT_SAMPLES and RMBENCH_RT_PATH_DEPTH must be positive"
++                )
++            sapien.render.set_ray_tracing_samples_per_pixel(ray_tracing_samples)
++            sapien.render.set_ray_tracing_path_depth(ray_tracing_path_depth)
++            sapien.render.set_ray_tracing_denoiser(
++                os.environ.get("RMBENCH_RT_DENOISER", "oidn")
++            )
+ 
+         # declare sapien scene
+         scene_config = sapien.SceneConfig()
+diff --git a/envs/robot/robot.py b/envs/robot/robot.py
+index fef2344..5bd25cc 100644
+--- a/envs/robot/robot.py
++++ b/envs/robot/robot.py
+@@ -13,6 +13,7 @@ import sapien.core as sapien
+ import envs._GLOBAL_CONFIGS as CONFIGS
+ from envs.utils import transforms
+ from .planner import CuroboPlanner
++from .curobo_config import resolve_curobo_config
+ import torch.multiprocessing as mp
+ mp.set_start_method("spawn", force=True)
+ 
+@@ -288,6 +289,14 @@ class Robot:
+ 
+         self.communication_flag = self.is_dual_arm and (abs_left_curobo_yml_path != abs_right_curobo_yml_path)
+ 
++        abs_left_curobo_yml_path = resolve_curobo_config(
++            abs_left_curobo_yml_path, CONFIGS.ROOT_PATH
++        )
++        if self.is_dual_arm:
++            abs_right_curobo_yml_path = resolve_curobo_config(
++                abs_right_curobo_yml_path, CONFIGS.ROOT_PATH
++            )
++
+ 
+         if not self.communication_flag:
+             self.left_planner = CuroboPlanner(self.left_entity_origion_pose,
+diff --git a/script/eval_policy_client.py b/script/eval_policy_client.py
+index 22e418a..0326972 100644
+--- a/script/eval_policy_client.py
++++ b/script/eval_policy_client.py
+@@ -50,6 +50,43 @@ import json
+ from typing import Any
+ import base64
+ 
++
++def _read_eval_progress(path, identity):
++    if path is None or not path.is_file():
++        return None
++    with path.open("r", encoding="utf-8") as handle:
++        payload = json.load(handle)
++    if payload.get("identity") != identity:
++        raise ValueError(
++            f"Evaluation progress identity mismatch in {path}: "
++            f"expected={identity}, found={payload.get('identity')}"
++        )
++    return payload
++
++
++def _write_eval_progress(path, identity, *, next_seed, evaluated, successes, episode_id,
++                         feasible_seeds, status):
++    if path is None:
++        return
++    path.parent.mkdir(parents=True, exist_ok=True)
++    payload = {
++        "schema_version": "rmbench-evaluation-progress-v1",
++        "identity": identity,
++        "status": status,
++        "next_seed": int(next_seed),
++        "evaluated_rollouts": int(evaluated),
++        "successes": int(successes),
++        "next_episode_id": int(episode_id),
++        "expert_feasible_seeds": [int(value) for value in feasible_seeds],
++        "updated_at_unix": time.time(),
++    }
++    temporary = path.with_suffix(path.suffix + ".tmp")
++    temporary.write_text(
++        json.dumps(payload, indent=2, sort_keys=True) + "\n", encoding="utf-8"
++    )
++    os.replace(temporary, path)
++
++
+ class NumpyEncoder(json.JSONEncoder):
+     """Enhanced json encoder for numpy types with array reconstruction info"""
+     def default(self, obj):
+@@ -131,7 +168,7 @@ def get_embodiment_config(robot_file):
+     return embodiment_args
+ 
+ class ModelClient:
+-    def __init__(self, host='localhost', port=9999, timeout=30):
++    def __init__(self, host='localhost', port=9999, timeout=600):
+         self.host = host
+         self.port = port
+         self.timeout = timeout
+@@ -326,7 +363,19 @@ def main(usr_args):
+ 
+     st_seed = 100000 * (1 + seed)
+     suc_nums = []
+-    test_num = 100
++    test_num = int(usr_args.get("eval_num_episodes", 100))
++    if test_num <= 0:
++        raise ValueError(f"eval_num_episodes must be positive, got {test_num}")
++    progress_value = str(usr_args.get("progress_path") or "").strip()
++    progress_path = Path(progress_value).expanduser().resolve() if progress_value else None
++    progress_identity = {
++        "task_name": task_name,
++        "task_config": task_config,
++        "checkpoint": str(Path(str(ckpt_setting)).expanduser().resolve()),
++        "instruction_type": instruction_type,
++        "seed": int(seed),
++        "target_rollouts": test_num,
++    }
+     topk = 1
+ 
+     # model = get_model(usr_args)
+@@ -339,7 +388,9 @@ def main(usr_args):
+                                    test_num=test_num,
+                                    video_size=video_size,
+                                    instruction_type=instruction_type,
+-                                   policy_conda_env=policy_conda_env)
++                                   policy_conda_env=policy_conda_env,
++                                   progress_path=progress_path,
++                                   progress_identity=progress_identity)
+     suc_nums.append(suc_num)
+ 
+     topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
+@@ -363,7 +414,9 @@ def eval_policy(task_name,
+                 test_num=100,
+                 video_size=None,
+                 instruction_type=None,
+-                policy_conda_env=None):
++                policy_conda_env=None,
++                progress_path=None,
++                progress_identity=None):
+     print(f"\033[34mTask Name: {args['task_name']}\033[0m")
+     print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
+ 
+@@ -381,9 +434,26 @@ def eval_policy(task_name,
+     now_seed = st_seed
+     task_total_reward = 0
+     clear_cache_freq = args["clear_cache_freq"]
++    max_setup_errors = int(os.environ.get("RMBENCH_MAX_SETUP_ERRORS", "3"))
++    if max_setup_errors <= 0:
++        raise ValueError("RMBENCH_MAX_SETUP_ERRORS must be positive")
++    consecutive_setup_errors = 0
+ 
+     args["eval_mode"] = True
+ 
++    progress = _read_eval_progress(progress_path, progress_identity)
++    if progress is not None:
++        now_seed = int(progress["next_seed"])
++        TASK_ENV.test_num = int(progress["evaluated_rollouts"])
++        TASK_ENV.suc = int(progress["successes"])
++        now_id = int(progress["next_episode_id"])
++        succ_seed = TASK_ENV.test_num
++        suc_test_seed_list = [int(value) for value in progress["expert_feasible_seeds"]]
++        print(
++            f"Resuming evaluation progress: {TASK_ENV.test_num}/{test_num} rollouts, "
++            f"{TASK_ENV.suc} successes, next seed {now_seed}"
++        )
++
+     while succ_seed < test_num:
+         render_freq = args["render_freq"]
+         args["render_freq"] = 0
+@@ -393,6 +463,7 @@ def eval_policy(task_name,
+                 TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
+                 episode_info = TASK_ENV.play_once()
+                 TASK_ENV.close_env()
++                consecutive_setup_errors = 0
+             except UnStableError as e:
+                 print(" -------------")
+                 print("Error: ", e)
+@@ -402,6 +473,7 @@ def eval_policy(task_name,
+                 args["render_freq"] = render_freq
+                 continue
+             except Exception as e:
++                consecutive_setup_errors += 1
+                 stack_trace = traceback.format_exc()
+                 print(" -------------")
+                 print("Error: ", stack_trace)
+@@ -409,7 +481,14 @@ def eval_policy(task_name,
+                 TASK_ENV.close_env()
+                 now_seed += 1
+                 args["render_freq"] = render_freq
+-                print("error occurs !")
++                print(
++                    "System setup error "
++                    f"{consecutive_setup_errors}/{max_setup_errors}"
++                )
++                if consecutive_setup_errors >= max_setup_errors:
++                    raise RuntimeError(
++                        "RMBench evaluation aborted after consecutive system setup errors"
++                    ) from e
+                 continue
+ 
+         if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
+@@ -489,6 +568,16 @@ def eval_policy(task_name,
+         )
+         # TASK_ENV._take_picture()
+         now_seed += 1
++        _write_eval_progress(
++            progress_path,
++            progress_identity,
++            next_seed=now_seed,
++            evaluated=TASK_ENV.test_num,
++            successes=TASK_ENV.suc,
++            episode_id=now_id,
++            feasible_seeds=suc_test_seed_list,
++            status="running" if TASK_ENV.test_num < test_num else "completed",
++        )
+ 
+     return now_seed, TASK_ENV.suc
+ 
+diff --git a/script/policy_model_server.py b/script/policy_model_server.py
+index bf4be63..0669c46 100644
+--- a/script/policy_model_server.py
++++ b/script/policy_model_server.py
+@@ -17,7 +17,6 @@ from collections import deque
+ sys.path.append("./")
+ sys.path.append(f"./policy")
+ sys.path.append("./description/utils")
+-from envs._GLOBAL_CONFIGS import CONFIGS_PATH
+ 
+ import numpy as np
+ from typing import Any
+diff --git a/envs/robot/curobo_config.py b/envs/robot/curobo_config.py
+new file mode 100644
+index 0000000..a1d80e7
+--- /dev/null
++++ b/envs/robot/curobo_config.py
+@@ -0,0 +1,109 @@
++"""Resolve machine-specific paths in Curobo robot configuration files."""
++
++from __future__ import annotations
++
++import hashlib
++import os
++import tempfile
++from pathlib import Path
++from typing import Any
++
++import yaml
++
++
++_FILE_FIELDS = ("urdf_path", "collision_spheres", "usd_path")
++
++
++def _resolve_asset_path(value: str, *, source: Path, repository_root: Path) -> Path:
++    expanded = value.replace("${ASSETS_PATH}", str(repository_root))
++    expanded = os.path.expanduser(os.path.expandvars(expanded))
++    candidate = Path(expanded)
++    if candidate.exists():
++        return candidate.resolve()
++
++    marker = "/assets/"
++    normalized = expanded.replace("\\", "/")
++    if marker in normalized:
++        relative = normalized.split(marker, 1)[1]
++        candidate = repository_root / "assets" / relative
++    elif candidate.is_absolute():
++        candidate = repository_root / candidate.name
++    else:
++        candidate = source.parent / candidate
++    return candidate.resolve()
++
++
++def resolve_curobo_config(
++    source_path: str | os.PathLike[str],
++    repository_root: str | os.PathLike[str],
++    *,
++    runtime_root: str | os.PathLike[str] | None = None,
++) -> str:
++    """Return a portable Curobo config path with all referenced assets validated."""
++    source = Path(source_path).expanduser().resolve()
++    root = Path(repository_root).expanduser().resolve()
++    if not source.is_file():
++        raise FileNotFoundError(f"Curobo config does not exist: {source}")
++
++    payload: dict[str, Any] = yaml.safe_load(source.read_text(encoding="utf-8"))
++    try:
++        kinematics = payload["robot_cfg"]["kinematics"]
++    except (KeyError, TypeError) as exc:
++        raise ValueError(f"Invalid Curobo config structure: {source}") from exc
++
++    changed = False
++    missing: list[str] = []
++    for field in _FILE_FIELDS:
++        value = kinematics.get(field)
++        if not value or value == "FILL_THIS":
++            continue
++        resolved = _resolve_asset_path(str(value), source=source, repository_root=root)
++        if not resolved.is_file():
++            missing.append(f"{field}={resolved}")
++            continue
++        resolved_value = str(resolved)
++        if resolved_value != value:
++            kinematics[field] = resolved_value
++            changed = True
++
++    asset_root = kinematics.get("asset_root_path")
++    if asset_root:
++        resolved_root = _resolve_asset_path(
++            str(asset_root), source=source, repository_root=root
++        )
++        if not resolved_root.is_dir():
++            missing.append(f"asset_root_path={resolved_root}")
++        elif str(resolved_root) != asset_root:
++            kinematics["asset_root_path"] = str(resolved_root)
++            changed = True
++
++    if missing:
++        raise FileNotFoundError(
++            f"Curobo config {source} references missing assets: {', '.join(missing)}"
++        )
++    if not changed:
++        return str(source)
++
++    digest = hashlib.sha256(
++        (str(source) + "\0" + str(root) + "\0" + source.read_text(encoding="utf-8")).encode(
++            "utf-8"
++        )
++    ).hexdigest()[:12]
++    base = (
++        Path(runtime_root).expanduser().resolve()
++        if runtime_root is not None
++        else Path(tempfile.gettempdir()) / f"rmbench-curobo-{os.getuid()}"
++    )
++    try:
++        relative_parent = source.parent.relative_to(root)
++    except ValueError:
++        relative_parent = Path(source.parent.name)
++    output_dir = base / digest / relative_parent
++    output_dir.mkdir(parents=True, exist_ok=True)
++    output = output_dir / f"{source.stem}-resolved.yml"
++    temporary = output.with_suffix(output.suffix + f".{os.getpid()}.tmp")
++    temporary.write_text(
++        yaml.safe_dump(payload, sort_keys=False), encoding="utf-8"
++    )
++    os.replace(temporary, output)
++    return str(output)

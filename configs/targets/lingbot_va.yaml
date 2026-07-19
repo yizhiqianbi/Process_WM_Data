@@ -48,6 +48,6 @@ profiles:
     height: 256
     width: 256
     frame_chunk_size: 4
-    action_per_frame: 8
+    action_per_frame: 16
     env_type: none
     fallback_action_text: Use the right arm to place the misplaced object into its correct category.

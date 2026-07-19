@@ -1,0 +1,71 @@
+{
+  "schema_version": "fastwam-camera-rectification-v1",
+  "description": "SHW5G specification-derived equidistant fisheye projection for the 960x744 Tianji streams, rectified to a 90-degree virtual pinhole camera.",
+  "provenance": {
+    "manufacturer": "Shenzhen SENSING Technology",
+    "camera_model": "SHW5G",
+    "source_document": "SHW5G Camera Spec.pdf",
+    "document_revision": "Rev.1",
+    "document_date": "2025-09",
+    "native_output_pixels": [
+      2560,
+      1984
+    ],
+    "dataset_pixels": [
+      960,
+      744
+    ],
+    "horizontal_fov_degrees": 130.0,
+    "vertical_fov_degrees": 102.0,
+    "effective_focal_length_mm": 2.18,
+    "derivation": "fx=(959/2)/radians(130/2); fy=(743/2)/radians(102/2); centered principal point; OpenCV equidistant fisheye model with unavailable higher-order coefficients set to zero."
+  },
+  "profiles": {
+    "tianji_shw5g_960x744_spec_equidistant": {
+      "model": "opencv_fisheye",
+      "calibration_status": "spec_derived_equidistant_fov_no_per_camera_kd",
+      "image_size": [
+        744,
+        960
+      ],
+      "camera_matrix": [
+        [
+          422.6665581003534,
+          0.0,
+          479.5
+        ],
+        [
+          0.0,
+          417.3604331198055,
+          371.5
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion_coefficients": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "virtual_camera": {
+        "projection": "pinhole",
+        "horizontal_fov_degrees": 90.0
+      }
+    }
+  },
+  "bindings": {
+    "source_key": {
+      "observation.images.left_eye": "tianji_shw5g_960x744_spec_equidistant",
+      "observation.images.right_eye": "tianji_shw5g_960x744_spec_equidistant",
+      "observation.images.left_wrist": "tianji_shw5g_960x744_spec_equidistant",
+      "observation.images.right_wrist": "tianji_shw5g_960x744_spec_equidistant"
+    },
+    "role": {}
+  },
+  "default_profile": null,
+  "unmatched_policy": "error"
+}

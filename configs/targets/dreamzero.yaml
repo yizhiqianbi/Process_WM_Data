@@ -30,8 +30,8 @@ profiles:
       column: annotation.task
     camera_keys:
       - observation.images.left_eye
-      - observation.images.right_wrist
       - observation.images.right_eye
+      - observation.images.right_wrist
     fallback_action_text: Use the right arm to place the misplaced object into its correct category.
     embodiment_tag: xdof
     upstream_profile_registered: true

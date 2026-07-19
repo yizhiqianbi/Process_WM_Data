@@ -68,6 +68,15 @@ def build_lingbot_va_command(
     python = required_path(model, "python", directory=False)
     dataset = required_path(model, "dataset_root", directory=True)
     model_root = required_path(model, "model_root", directory=True)
+    batch_size = int(model.get("batch_size", 1))
+    window_frames = int(model.get("window_frames", 0))
+    samples_per_episode = int(model.get("samples_per_episode", 1))
+    if batch_size <= 0 or samples_per_episode <= 0:
+        raise TuningConfigError("LingBot-VA batch_size and samples_per_episode must be positive")
+    if batch_size > 1 and window_frames <= 0:
+        raise TuningConfigError(
+            "LingBot-VA batch_size > 1 requires a positive window_frames value"
+        )
     _validate_latent_coverage(
         dataset, allow_partial=bool(model.get("allow_partial_latents", False))
     )
@@ -95,6 +104,12 @@ def build_lingbot_va_command(
         str(int(model.get("save_interval", 1))),
         "--workers",
         str(int(model.get("workers", 0))),
+        "--batch-size",
+        str(batch_size),
+        "--window-frames",
+        str(window_frames),
+        "--samples-per-episode",
+        str(samples_per_episode),
         "--gradient-accumulation-steps",
         str(int(model.get("gradient_accumulation_steps", 1))),
     ]

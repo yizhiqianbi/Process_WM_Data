@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import json
+import math
 import os
 from pathlib import Path
 import subprocess
@@ -142,6 +143,63 @@ class TuningTest(unittest.TestCase):
             gpus="3",
         )
         self.assertIn(f"resume={relative_resume.resolve()}", resumed.argv)
+
+    def test_fastwam_builder_uses_torchrun_for_multiple_gpus(self) -> None:
+        with patch.dict(os.environ, {"TEST_FASTWAM_REPO": str(self.repo)}):
+            config = load_tuning_config(self._write_config())
+
+        spec = build_fastwam_command(
+            config,
+            phase="stage3_finetune",
+            output_dir=self.root / "distributed-run",
+            steps=1250,
+            resume=None,
+            gpus="0,2,4,6",
+        )
+
+        self.assertEqual(spec.env["CUDA_VISIBLE_DEVICES"], "0,2,4,6")
+        self.assertEqual(
+            spec.argv[:6],
+            (
+                str(self.python),
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                "--nproc_per_node=4",
+                "scripts/train.py",
+            ),
+        )
+        self.assertIn("++expected_world_size=4", spec.argv)
+        self.assertIn("max_steps=1250", spec.argv)
+
+    def test_shw5g_spec_rectification_derives_intrinsics_from_documented_fov(self) -> None:
+        path = PROJECT_ROOT / "configs" / "cameras" / "tianji_shw5g_spec_fov_v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+        profile = payload["profiles"]["tianji_shw5g_960x744_spec_equidistant"]
+        matrix = profile["camera_matrix"]
+
+        self.assertEqual(payload["provenance"]["native_output_pixels"], [2560, 1984])
+        self.assertEqual(payload["provenance"]["dataset_pixels"], [960, 744])
+        self.assertAlmostEqual(matrix[0][0], 479.5 / math.radians(65.0), places=10)
+        self.assertAlmostEqual(matrix[1][1], 371.5 / math.radians(51.0), places=10)
+        self.assertEqual(profile["distortion_coefficients"], [0.0, 0.0, 0.0, 0.0])
+        self.assertEqual(profile["virtual_camera"]["horizontal_fov_degrees"], 90.0)
+        self.assertEqual(len(payload["bindings"]["source_key"]), 4)
+        self.assertEqual(payload["unmatched_policy"], "error")
+
+    def test_fastwam_builder_rejects_duplicate_gpu_ids(self) -> None:
+        with patch.dict(os.environ, {"TEST_FASTWAM_REPO": str(self.repo)}):
+            config = load_tuning_config(self._write_config())
+
+        with self.assertRaisesRegex(TuningConfigError, "unique non-negative"):
+            build_fastwam_command(
+                config,
+                phase="stage3_finetune",
+                output_dir=self.root / "distributed-run",
+                steps=2,
+                resume=None,
+                gpus="0,0",
+            )
 
     def test_fastwam_overfit_phase_freezes_sample_and_evaluation(self) -> None:
         model_source = self.repo / "src" / "fastwam" / "models" / "wan22"
@@ -301,6 +359,31 @@ class TuningTest(unittest.TestCase):
         )
         self.assertEqual(spec.env["CUDA_VISIBLE_DEVICES"], "4")
         self.assertIn("--gradient-accumulation-steps", spec.argv)
+        self.assertEqual(spec.argv[spec.argv.index("--batch-size") + 1], "1")
+
+        config["models"]["lingbot_va"]["batch_size"] = 2
+        with self.assertRaisesRegex(TuningConfigError, "positive window_frames"):
+            build_lingbot_va_command(
+                config,
+                phase="finetune",
+                output_dir=self.root / "run-lingbot-batch",
+                steps=1,
+                resume=None,
+                gpus="4",
+            )
+        config["models"]["lingbot_va"].update(
+            {"window_frames": 16, "samples_per_episode": 4}
+        )
+        batched = build_lingbot_va_command(
+            config,
+            phase="finetune",
+            output_dir=self.root / "run-lingbot-batch",
+            steps=1,
+            resume=None,
+            gpus="4",
+        )
+        self.assertEqual(batched.argv[batched.argv.index("--batch-size") + 1], "2")
+        self.assertEqual(batched.argv[batched.argv.index("--window-frames") + 1], "16")
 
     def test_dreamzero_builder_validates_installed_profile(self) -> None:
         repo = self.root / "dreamzero"
@@ -336,6 +419,13 @@ class TuningTest(unittest.TestCase):
                     "wan_model_root": str(wan),
                     "tokenizer_root": str(tokenizer),
                     "pretrained_model_root": str(pretrained),
+                    "gpus": "0,1,2,3,4,5,6,7",
+                    "num_gpus": 8,
+                    "batch_size": 2,
+                    "global_batch_size": 32,
+                    "save_interval": 17,
+                    "save_total_limit": 5,
+                    "workers": 3,
                     **{key: str(value) for key, value in files.items()},
                 }
             }
@@ -346,11 +436,29 @@ class TuningTest(unittest.TestCase):
             output_dir=self.root / "run-dreamzero",
             steps=2,
             resume=None,
-            gpus="5",
+            gpus="0,1,2,3,4,5,6,7",
         )
-        self.assertEqual(spec.env["CUDA_VISIBLE_DEVICES"], "5")
+        self.assertEqual(spec.env["CUDA_VISIBLE_DEVICES"], "0,1,2,3,4,5,6,7")
         self.assertIn("data=dreamzero/xdof_relative", spec.argv)
         self.assertIn("max_steps=2", spec.argv)
+        self.assertIn("per_device_train_batch_size=2", spec.argv)
+        self.assertIn("global_batch_size=32", spec.argv)
+        self.assertIn("save_steps=2", spec.argv)
+        self.assertIn("save_total_limit=5", spec.argv)
+        self.assertIn("dataloader_num_workers=3", spec.argv)
+        self.assertIn("dataloader_persistent_workers=true", spec.argv)
+
+        config["models"]["dreamzero"]["global_batch_size"] = 31
+        with self.assertRaisesRegex(TuningConfigError, "positive multiple"):
+            build_dreamzero_command(
+                config,
+                phase="finetune",
+                output_dir=self.root / "run-dreamzero",
+                steps=2,
+                resume=None,
+                gpus="0,1,2,3,4,5,6,7",
+            )
+        config["models"]["dreamzero"]["global_batch_size"] = 32
 
         profile.unlink()
         with self.assertRaisesRegex(TuningConfigError, "profile is not installed"):
@@ -360,7 +468,7 @@ class TuningTest(unittest.TestCase):
                 output_dir=self.root / "run-dreamzero",
                 steps=2,
                 resume=None,
-                gpus="5",
+                gpus="0,1,2,3,4,5,6,7",
             )
 
     def test_dreamzero_wrapper_pins_explicit_checkpoint_and_skips_full_save(self) -> None:

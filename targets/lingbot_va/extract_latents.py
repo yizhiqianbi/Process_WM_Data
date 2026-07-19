@@ -114,6 +114,15 @@ def _decode_selected_frames(video_path: Path, frame_ids: list[int]) -> np.ndarra
     return np.stack([decoded[value] for value in frame_ids])
 
 
+def _complete_causal_frame_ids(frame_ids: list[int], temporal_stride: int) -> list[int]:
+    if temporal_stride <= 0:
+        raise TargetPreparationError("VAE temporal stride must be positive")
+    if not frame_ids:
+        raise TargetPreparationError("latent job has no frame IDs")
+    usable_count = 1 + ((len(frame_ids) - 1) // temporal_stride) * temporal_stride
+    return frame_ids[:usable_count]
+
+
 def _encode_text(tokenizer: Any, text_encoder: Any, text: str, torch: Any) -> Any:
     encoded = tokenizer(
         [text],
@@ -206,6 +215,8 @@ def extract_lingbot_va_latents(
     episode_indices: set[int] | None = None,
     max_segments: int | None = None,
     overwrite: bool = False,
+    receipt_path: Path | None = None,
+    write_empty_embedding: bool = True,
 ) -> dict[str, Any]:
     root = root.expanduser().resolve()
     model_root = model_root.expanduser().resolve()
@@ -253,8 +264,9 @@ def extract_lingbot_va_latents(
     tokenizer = load_tokenizer(model_root / "tokenizer")
 
     text_cache: dict[str, Any] = {}
-    empty_embedding = _encode_text(tokenizer, text_encoder, "", torch)
-    _atomic_torch_save(empty_embedding, root / "empty_emb.pt", torch)
+    if write_empty_embedding:
+        empty_embedding = _encode_text(tokenizer, text_encoder, "", torch)
+        _atomic_torch_save(empty_embedding, root / "empty_emb.pt", torch)
     written = 0
     skipped = 0
     completed_segments = 0
@@ -268,7 +280,10 @@ def extract_lingbot_va_latents(
                 skipped += 1
                 continue
             video_path = _resolve_video(root, job)
-            frame_ids = [int(value) for value in job["frame_ids"]]
+            frame_ids = _complete_causal_frame_ids(
+                [int(value) for value in job["frame_ids"]],
+                int(job.get("vae_temporal_stride") or 4),
+            )
             frames = _decode_selected_frames(video_path, frame_ids)
             latent = _encode_video(
                 frames,
@@ -313,7 +328,11 @@ def extract_lingbot_va_latents(
         "skipped_latent_count": skipped,
         "empty_embedding": "empty_emb.pt",
     }
-    write_json(root / "meta" / "lingbot_va_latent_receipt.json", receipt)
+    receipt_path = receipt_path or Path("meta/lingbot_va_latent_receipt.json")
+    receipt_output = _safe_output_path(root, str(receipt_path))
+    receipt["receipt_path"] = str(receipt_output.relative_to(root))
+    receipt["wrote_empty_embedding"] = write_empty_embedding
+    write_json(receipt_output, receipt)
     return receipt
 
 
@@ -338,6 +357,16 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--episode", type=int, action="append")
     parser.add_argument("--max-segments", type=int)
     parser.add_argument("--overwrite", action="store_true")
+    parser.add_argument(
+        "--receipt-path",
+        type=Path,
+        help="Receipt path inside the target root; use one path per parallel worker",
+    )
+    parser.add_argument(
+        "--skip-empty-embedding",
+        action="store_true",
+        help="Do not rewrite the shared empty_emb.pt from this worker",
+    )
     args = parser.parse_args(argv)
     if args.episode_indices is not None and args.episode:
         parser.error("--episode-indices and --episode are mutually exclusive")
@@ -354,6 +383,8 @@ def main(argv: list[str] | None = None) -> None:
         episode_indices=episode_indices,
         max_segments=args.max_segments,
         overwrite=args.overwrite,
+        receipt_path=args.receipt_path,
+        write_empty_embedding=not args.skip_empty_embedding,
     )
     print(json.dumps(result, ensure_ascii=False, indent=2, sort_keys=True))
 

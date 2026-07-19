@@ -31,6 +31,33 @@ def build_dreamzero_command(
         )
     if resume is not None and not resume.expanduser().resolve().is_dir():
         raise TuningConfigError(f"DreamZero resume checkpoint is missing: {resume}")
+    num_gpus = int(model.get("num_gpus", 1))
+    batch_size = int(model.get("batch_size", 1))
+    configured_save_interval = int(model.get("save_interval", steps))
+    save_interval = min(configured_save_interval, steps)
+    save_total_limit = int(model.get("save_total_limit", 5))
+    workers = int(model.get("workers", 0))
+    if num_gpus <= 0 or batch_size <= 0:
+        raise TuningConfigError("DreamZero num_gpus and batch_size must be positive")
+    if configured_save_interval <= 0 or save_total_limit < 5 or workers < 0:
+        raise TuningConfigError(
+            "DreamZero save_interval must be positive, save_total_limit must be at least 5, "
+            "and workers must be non-negative"
+        )
+    visible_gpus = gpus or str(model.get("gpus") or "0")
+    gpu_ids = [value.strip() for value in visible_gpus.split(",") if value.strip()]
+    if len(gpu_ids) != num_gpus:
+        raise TuningConfigError(
+            "DreamZero num_gpus must match CUDA_VISIBLE_DEVICES: "
+            f"num_gpus={num_gpus}, devices={gpu_ids}"
+        )
+    per_step_batch = batch_size * num_gpus
+    global_batch_size = int(model.get("global_batch_size", per_step_batch))
+    if global_batch_size <= 0 or global_batch_size % per_step_batch != 0:
+        raise TuningConfigError(
+            "DreamZero global_batch_size must be a positive multiple of "
+            f"batch_size * num_gpus ({per_step_batch})"
+        )
     process_repo = Path(__file__).resolve().parents[1]
     wrapper = process_repo / "scripts" / "run_dreamzero_training.py"
     argv = [
@@ -38,7 +65,7 @@ def build_dreamzero_command(
         "-m",
         "torch.distributed.run",
         "--standalone",
-        f"--nproc_per_node={int(model.get('num_gpus', 1))}",
+        f"--nproc_per_node={num_gpus}",
         str(wrapper),
         "--dreamzero-repo",
         str(repo),
@@ -63,20 +90,22 @@ def build_dreamzero_command(
             "num_state_per_block=1",
             f"training_args.learning_rate={float(model.get('learning_rate', 1e-5))}",
             'training_args.deepspeed=""',
-            "training_args.warmup_ratio=0.0",
-            "save_steps=1",
+            f"training_args.warmup_ratio={float(model.get('warmup_ratio', 0.05))}",
+            f"save_steps={save_interval}",
             f"output_dir={output_dir.expanduser().resolve()}",
-            "per_device_train_batch_size=1",
+            f"per_device_train_batch_size={batch_size}",
+            f"global_batch_size={global_batch_size}",
+            "raise_error_if_global_batch_size_not_set=true",
             f"max_steps={steps}",
             "weight_decay=1e-5",
-            "save_total_limit=5",
+            f"save_total_limit={save_total_limit}",
             "upload_checkpoints=false",
             "bf16=true",
             "tf32=true",
             "eval_bf16=true",
             "dataloader_pin_memory=false",
-            "dataloader_num_workers=0",
-            "dataloader_persistent_workers=false",
+            f"dataloader_num_workers={workers}",
+            f"dataloader_persistent_workers={'true' if workers > 0 else 'false'}",
             f"image_resolution_width={int(model.get('image_width', 320))}",
             f"image_resolution_height={int(model.get('image_height', 176))}",
             "save_lora_only=true",
@@ -96,7 +125,7 @@ def build_dreamzero_command(
     )
     env = {
         "ATTENTION_BACKEND": "torch",
-        "CUDA_VISIBLE_DEVICES": gpus or str(model.get("gpus") or "0"),
+        "CUDA_VISIBLE_DEVICES": visible_gpus,
         "HYDRA_FULL_ERROR": "1",
         "NO_ALBUMENTATIONS_UPDATE": "1",
         "PYTHONPATH": str(repo),

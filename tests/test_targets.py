@@ -164,7 +164,7 @@ class TargetPreparationTest(unittest.TestCase):
         source = self.root / "robotwin"
         output = self.root / "robotwin_lingbot"
         _build_lerobot_fixture(
-            source, action_width=16, state_width=16, cameras=cameras
+            source, action_width=16, state_width=16, cameras=cameras, fps=40
         )
         document, profile = load_target_profile(
             ROOT / "configs" / "targets" / "lingbot_va.yaml",
@@ -233,12 +233,13 @@ class TargetPreparationTest(unittest.TestCase):
         self.assertEqual(
             model_profile["used_action_channel_ids"], [21, 22, 23, 24, 25, 26, 27, 29]
         )
+        self.assertEqual(model_profile["action_per_frame"], 16)
         self.assertFalse((output / "data").is_symlink())
         jobs = list(iter_jsonl(output / "meta" / "lingbot_va_latent_jobs.jsonl"))
         self.assertEqual(jobs[0]["target_fps"], 7.0)
         self.assertEqual(jobs[0]["target_height"], 256)
         self.assertEqual(jobs[0]["target_width"], 256)
-        self.assertEqual(np.diff(jobs[0]["frame_ids"]).tolist(), [4] * 7)
+        self.assertEqual(np.diff(jobs[0]["frame_ids"]).tolist(), [4] * 4)
 
     def test_dreamzero_profile_generates_gear_metadata_and_language(self) -> None:
         cameras = [
@@ -293,7 +294,7 @@ class TargetPreparationTest(unittest.TestCase):
         training_profile = yaml.safe_load(training_profile_text)
         self.assertEqual(
             training_profile["modality_config_xdof"]["video"]["modality_keys"],
-            ["video.left_eye", "video.right_wrist", "video.right_eye"],
+            ["video.left_eye", "video.right_eye", "video.right_wrist"],
         )
         self.assertEqual(
             training_profile["relative_action_keys"], ["right_joint_position"]

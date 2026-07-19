@@ -27,16 +27,19 @@ from this repository.
 | Old LingBot-VA target preparation | Passed on real 44-episode self-data and synthetic fixtures | 15D-to-8D compact action, 30D mapping, 132 latent jobs and latent readiness gate |
 | DreamZero target preparation | Passed on real 44-episode self-data and synthetic fixture | GEAR modality, absolute/relative stats, language column and Hydra registration gate |
 | FastWAM self-data preprocessing | Passed | 44 A-tier episodes; 486 windows: 381 action and 105 interval-downgraded video-only; 127 deduplicated cases |
-| Unified three-model launcher | Passed | Structured argv, external SHA, logs, receipts, checkpoint discovery and explicit resume |
+| Unified three-model launcher | Passed | Structured argv, explicit 1/8-GPU torchrun world size, external SHA, logs, receipts, checkpoint discovery and resume |
 | FastWAM self-data optimizer/resume | Passed | Real step 1, full-state resume to step 2, action/video/memory losses finite |
 | FastWAM Tianji fixed-window overfit | Passed | Step 300 first passes; selected cumulative step 900: 26.8693 dB, 0.9313 SSIM, action L1 0.01941; memory fully valid |
 | Tianji active camera-domain policy | Training-validated smoke | Active full-dataset run preserves raw fisheye; all 8 probes report `[false,false,false]` rectification masks and null config |
-| Tianji dataset-overfit plan | Training-validated smoke | 44 episodes, 486 windows, 8 fixed cross-episode probes; real 2-step optimizer/checkpoint passed, convergence pending |
-| FastWAM inference/GT pair demo | Training-validated smoke | 8 real probes produced synchronized H.264 640x416/21-frame imagination-vs-execution pairs; action composite remains available |
+| Tianji dataset-overfit plan | 8-GPU training active | 44 episodes, 486 windows, 8 fixed cross-episode probes; true 8-rank DDP step-2 smoke passed and 1,250-global-step run launched; convergence pending |
+| FastWAM DDP contract | Passed | World size 8, global batch 8, eight unique first-batch indices, post-step parameter probe max difference `0.000e+00` |
+| FastWAM inference/GT pair demo | Training-validated smoke | 8 probes are rank-sharded and merged once; synchronized H.264 640x416/21-frame imagination-vs-execution pairs and action composites passed |
 | Old LingBot-VA optimizer/resume | Passed on one complete three-view latent segment | Real step 1, optimizer/scheduler resume to step 2, latent/action losses finite |
 | DreamZero optimizer/resume | Passed | Real LoRA step 1, Trainer resume to step 2, dynamics/action losses finite |
-| Repository tests | Passed | 58 tests, including full-dataset planning, rectification launcher and fixed-sample reports |
-| FastWAM integration tests | Passed | 27 tests in connected and clean-patch checkouts, including optional rectification, inference/GT pair, action video and padded-action inference |
+| DreamZero full self-data overfit | Passed | 8 H200, 44 episodes, global batch 8, 500/500 steps; complete `checkpoint-500`, final loss `0.0651` |
+| DreamZero GT-observation Pair inference | Passed | Longest 8 eligible episodes, 913 frames/case and 7304-frame reel; all 33 MP4 files/36,520 frames decoded, GT frame IDs audited, no future-GT or predicted-latent observation feedback |
+| Repository tests | Passed | 78 tests, including target preparation, long DreamZero Pair scheduling, 8-GPU launchers, rectification and tuning contracts |
+| FastWAM integration tests | Passed | 41 tests in the connected checkout, including canonical RMBench data/memory/action contracts and launch/result validation |
 | AgiBot-specific optimizer/checkpoint smoke | Pending dataset-specific run | The current optimizer proof uses `take_wrong_item_right_arm`, not AgiBot |
 | Full nine-domain production stats | Pending full manifests | Validation stats currently cover only locally materialized train/A/joint domains |
 
@@ -55,6 +58,15 @@ were launched through `scripts/tune_models.py`. Runtime receipts are under each 
 The DreamZero step-2 checkpoint contains a 414 MiB LoRA/model state and an 829 MiB optimizer
 state. The wrapper suppresses the upstream duplicate final export of the complete 16.5B model;
 this does not remove any state needed to resume training.
+
+The production DreamZero overfit then trained all 44 self-data episodes for 500 steps on eight
+H200 GPUs. The complete step-500 adapter checkpoint was used for eight-case pair inference. Each
+case uses 114 receding-horizon chunks and produces 913 frames at 28 FPS; this is the largest
+uniform `1 + 8k` horizon supported by the eight longest eligible episodes because the shortest
+selected episode has 920 source frames. The aggregate contains 7,304 frames. Independent PyAV
+validation decoded all 32 per-case videos plus the reel, 36,520 frames in total, and verified
+nonblank first and last frames. Receipt-level metrics average `20.7243 dB` over the three camera
+PSNR values and `0.06543` MAE over the eight action channels.
 
 These are optimizer and checkpoint smoke tests, not convergence results. They do not establish
 multi-node throughput, long-horizon stability, validation quality, offline policy metrics, or

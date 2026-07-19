@@ -110,7 +110,12 @@ def _sample_frame_ids(start: int, end: int, source_fps: float, target_fps: float
             "old LingBot-VA requires an integer source-to-latent frame stride; "
             f"got source_fps={source_fps:g}, target_fps={target_fps:g}"
         )
-    return list(range(start, end, rounded_stride))
+    frame_ids = list(range(start, end, rounded_stride))
+    # Wan's causal VAE emits one latent from the first frame and then one per
+    # complete four-frame block. LingBot-VA derives its action length with the
+    # same floor rule, so a trailing partial block must not be encoded.
+    usable_count = 1 + ((len(frame_ids) - 1) // 4) * 4
+    return frame_ids[:usable_count]
 
 
 def _materialize_compact_actions(
@@ -252,6 +257,22 @@ def prepare_lingbot_va_target(
     compact_identity = source_indices == list(range(source_width))
     source_fps = float(source.info.get("fps") or 0.0)
     latent_fps = float(profile.get("latent_fps") or min(10.0, source_fps))
+    frame_stride = source_fps / latent_fps
+    rounded_frame_stride = int(round(frame_stride))
+    if not np.isclose(frame_stride, rounded_frame_stride, atol=1e-6):
+        raise TargetPreparationError(
+            "old LingBot-VA requires an integer source-to-latent frame stride; "
+            f"got source_fps={source_fps:g}, target_fps={latent_fps:g}"
+        )
+    expected_action_per_frame = rounded_frame_stride * 4
+    configured_action_per_frame = int(
+        profile.get("action_per_frame") or expected_action_per_frame
+    )
+    if configured_action_per_frame != expected_action_per_frame:
+        raise TargetPreparationError(
+            "action_per_frame must match source FPS, latent FPS, and Wan VAE stride: "
+            f"expected {expected_action_per_frame}, got {configured_action_per_frame}"
+        )
     fallback_text = str(profile.get("fallback_action_text") or "")
     prepared_episodes: list[dict[str, Any]] = []
     latent_jobs: list[dict[str, Any]] = []
@@ -330,7 +351,7 @@ def prepare_lingbot_va_target(
         "height": int(profile.get("height") or 256),
         "width": int(profile.get("width") or 256),
         "frame_chunk_size": int(profile.get("frame_chunk_size") or 4),
-        "action_per_frame": int(profile.get("action_per_frame") or 8),
+        "action_per_frame": configured_action_per_frame,
         "env_type": str(profile.get("env_type") or "none"),
         "action_norm_method": "quantiles",
         "norm_stat": _mapped_norm_stats(action_stats, model_channels),

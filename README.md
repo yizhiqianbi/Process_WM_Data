@@ -51,7 +51,9 @@ python3 -m pip install -r requirements.txt
 ```
 
 FastWAM 模型仓库的 canonical memory 训练扩展以纯代码 patch 保存在
-[`integrations/fastwam/`](integrations/fastwam/README.md)，不需要从本机复制整个 dirty checkout。
+[`integrations/fastwam/`](integrations/fastwam/README.md)，RMBench simulator 的可恢复闭环评测
+补丁保存在 [`integrations/rmbench/`](integrations/rmbench/README.md)。两者都不需要从本机复制
+整个 dirty checkout。
 
 ## FastWAM Pipeline
 
@@ -153,6 +155,7 @@ configs/targets/          模型 target profiles 与固定上游 revision
 fastwam_preprocess/       source adapter、清洗和 FastWAM canonical 实现
 targets/                  FastWAM、old LingBot-VA、DreamZero target 代码
 integrations/fastwam/     固定上游 SHA 的 MemoryFastWAM 纯代码 patch
+integrations/rmbench/      固定上游 SHA 的 RMBench 闭环 runtime patch
 scripts/                  下载、清洗、target preparation 和验证入口
 tests/                    单元测试与真实 schema 回归
 docs/                     数据、target、训练和状态文档

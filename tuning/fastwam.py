@@ -13,6 +13,19 @@ from .common import (
 )
 
 
+def _parse_gpu_selection(value: str) -> tuple[str, ...]:
+    gpu_ids = tuple(part.strip() for part in str(value).split(","))
+    if (
+        not gpu_ids
+        or any(not gpu_id.isdigit() for gpu_id in gpu_ids)
+        or len(set(gpu_ids)) != len(gpu_ids)
+    ):
+        raise TuningConfigError(
+            "FastWAM GPUs must be a comma-separated list of unique non-negative IDs."
+        )
+    return gpu_ids
+
+
 def _require_memory_joint_inference(repo: Path) -> None:
     model_path = repo / "src" / "fastwam" / "models" / "wan22" / "memory_fastwam.py"
     trainer_path = repo / "src" / "fastwam" / "trainer.py"
@@ -95,9 +108,23 @@ def build_fastwam_command(
     eval_every = int(phase_cfg.get("eval_every", 0))
     if save_every < 0 or eval_every < 0:
         raise TuningConfigError("FastWAM save_every and eval_every must be non-negative")
+    selected_gpus = str(gpus or model.get("gpus") or "0")
+    gpu_ids = _parse_gpu_selection(selected_gpus)
+    world_size = len(gpu_ids)
+    launcher = [str(python)]
+    if world_size > 1:
+        launcher.extend(
+            [
+                "-m",
+                "torch.distributed.run",
+                "--standalone",
+                f"--nproc_per_node={world_size}",
+            ]
+        )
     argv = [
-        str(python),
+        *launcher,
         "scripts/train.py",
+        f"++expected_world_size={world_size}",
         f"task={task}",
         f"output_dir={output_dir.expanduser().resolve()}",
         f"max_steps={steps}",
@@ -229,11 +256,12 @@ def build_fastwam_command(
 
     diffsynth_root = required_path(model, "diffsynth_model_base", directory=True)
     env = {
-        "CUDA_VISIBLE_DEVICES": gpus or str(model.get("gpus") or "0"),
+        "CUDA_VISIBLE_DEVICES": ",".join(gpu_ids),
         "DIFFSYNTH_MODEL_BASE_PATH": str(diffsynth_root),
         "FASTWAM_PREPROCESS_ROOT": str(data_root),
         "PYTHONPATH": str(repo / "src"),
         "TOKENIZERS_PARALLELISM": "false",
+        "OMP_NUM_THREADS": "1",
     }
     if model.get("stage1_video_checkpoint"):
         env["FASTWAM_STAGE1_VIDEO_CKPT"] = str(
