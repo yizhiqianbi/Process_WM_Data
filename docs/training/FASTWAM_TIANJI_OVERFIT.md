@@ -96,6 +96,18 @@ step 0 才是有效基线。
 
 ## 6. 启动
 
+新服务器先把代码仓库携带的 integration 应用到固定 FastWAM 基线：
+
+```bash
+scripts/apply_fastwam_integration.sh --check /path/to/FastWAM
+scripts/apply_fastwam_integration.sh --apply /path/to/FastWAM
+```
+
+补丁范围、上游 SHA 和干净 checkout 要求见
+[`integrations/fastwam/README.md`](../../integrations/fastwam/README.md)。统一 launcher 的 overfit
+preflight 还会检查 `infer_joint`、`infer` 和 trainer 是否具备 memory-aware 固定评测能力，避免
+在旧版 FastWAM 上启动数小时后才失败。
+
 先验证命令和路径：
 
 ```bash

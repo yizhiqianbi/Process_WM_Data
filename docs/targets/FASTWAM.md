@@ -33,3 +33,6 @@ work/stage_pipeline/<dataset>/cases/training_cases.jsonl
 ```
 
 详细数据接口见 [FastWAM Data Interface](../training/FASTWAM_DATA_INTERFACE.md)，三阶段训练见 [FastWAM Three-Stage](../training/FASTWAM_THREE_STAGE.md)。
+
+模型侧的 `TrainingCaseV1` loader、8/2/1 memory、联合推理与固定评测实现以代码 patch 固定在
+[`integrations/fastwam/`](../../integrations/fastwam/README.md)，基线 SHA 和应用命令以该目录为准。
