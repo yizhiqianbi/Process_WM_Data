@@ -2,7 +2,7 @@
 
 [文档索引](../README.md)
 
-Updated: 2026-07-18
+Updated: 2026-07-19
 
 This page records what has been demonstrated by executable tests and real source files. It is
 not a claim that every upstream dataset has finished downloading or that production pretraining
@@ -24,7 +24,9 @@ from this repository.
 | Three-camera FastWAM loader | Passed | `[3,21,384,320]`, all three camera roles present |
 | FastWAM 8/2/1 memory loader | Passed | 11/11 valid history frames, all indices earlier than window start |
 | Text conditioning cache | Passed | `[128,4096]` finite UMT5 context |
-| Preprocessing tests | Passed | 40 tests |
+| Old LingBot-VA target preparation | Passed on real 44-episode self-data and synthetic fixtures | 15D-to-8D compact action, 30D mapping, 132 latent jobs and latent readiness gate |
+| DreamZero target preparation | Passed on real 44-episode self-data and synthetic fixture | GEAR modality, absolute/relative stats, language column and Hydra registration gate |
+| Preprocessing tests | Passed | 44 tests |
 | FastWAM integration tests | Passed | 15 tests in the connected FastWAM checkout |
 | AgiBot component download | Running | Locked selection: 224 files, 247.35 GiB, four file workers |
 | AgiBot 5B optimizer/checkpoint smoke | Pending resource gate | Config composes; current job cannot access CUDA/NVML and the host GPUs are occupied |
@@ -41,6 +43,14 @@ use 81 state points, 80 actions, and 21 video points.
 The full upstream repositories, full video decode, normalization rebuild, and GPU optimizer
 regression remain pending. Exact source layouts and commands are in
 [LingBot-VA / DreamZero](../datasets/LINGBOT_VA_DREAMZERO.md).
+
+The model-target exporters were also run against the current 44-episode, 31,359-frame,
+LeRobot v2.1 `take_wrong_item_right_arm` dataset. The old LingBot-VA exporter compacted the
+15D action to eight declared right-arm/right-gripper dimensions and emitted 132 deterministic
+latent jobs. The DreamZero exporter emitted the custom GEAR metadata, relative statistics,
+language column, and Hydra patch. Both outputs passed structural validation; LingBot-VA remains
+not training-ready until all 132 VAE latents exist, and DreamZero remains not training-ready
+until the generated `xdof` profile is registered in the upstream checkout.
 
 ## AgiBot real-data proof
 

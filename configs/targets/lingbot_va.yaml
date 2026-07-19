@@ -1,0 +1,53 @@
+schema_version: lingbot-va-target-profiles-v1
+target: lingbot_va
+upstream_repository: https://github.com/Robbyant/lingbot-va
+upstream_revision: 7c6ffa9bfc4b83582cafc860fab4c82cc7deeeeb
+profiles:
+  robotwin:
+    action_column: action
+    source_action_indices: [0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15]
+    model_action_channels: [0, 1, 2, 3, 4, 5, 6, 28, 7, 8, 9, 10, 11, 12, 13, 29]
+    camera_keys:
+      - observation.images.cam_high
+      - observation.images.cam_left_wrist
+      - observation.images.cam_right_wrist
+    num_views: 3
+    latent_fps: 10
+    height: 256
+    width: 320
+    frame_chunk_size: 2
+    action_per_frame: 16
+    env_type: robotwin_tshape
+    relative_pose_groups:
+      - [0, 7]
+      - [8, 15]
+  libero:
+    action_column: action
+    source_action_indices: [0, 1, 2, 3, 4, 5, 6]
+    model_action_channels: [0, 1, 2, 3, 4, 5, 6]
+    camera_keys:
+      - observation.images.agentview_rgb
+      - observation.images.eye_in_hand_rgb
+    num_views: 2
+    latent_fps: 10
+    height: 128
+    width: 128
+    frame_chunk_size: 4
+    action_per_frame: 4
+    env_type: none
+  take_wrong_item_right_arm:
+    action_column: action
+    source_action_indices: [0, 1, 2, 3, 4, 5, 6, 14]
+    model_action_channels: [21, 22, 23, 24, 25, 26, 27, 29]
+    camera_keys:
+      - observation.images.left_eye
+      - observation.images.right_eye
+      - observation.images.right_wrist
+    num_views: 3
+    latent_fps: 10
+    height: 256
+    width: 256
+    frame_chunk_size: 4
+    action_per_frame: 8
+    env_type: none
+    fallback_action_text: Use the right arm to place the misplaced object into its correct category.

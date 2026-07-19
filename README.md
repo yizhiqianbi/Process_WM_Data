@@ -1,34 +1,30 @@
-# FastWAM Multi-Dataset Preprocessing
+# Process WM Data
 
-面向 FastWAM 预训练和微调的多数据集下载、清洗、统一格式与训练接入代码。仓库支持以下九个逻辑数据源：
+面向 world-action model 的多数据集下载、清洗、统一语义和模型专用 target preparation 代码。
 
-- OXE / Open X-Embodiment
-- OXE-AugE
-- AgiBot-Beta
-- RoboCOIN
-- RoboMIND
-- Galaxea
-- InternData-A1
-- LingBot-VA
-- DreamZero-DROID
+仓库只保存代码、配置和数据合同，不提交原始数据、生成的 `work/`、模型权重、checkpoint 或 token。原始数据只读，所有清洗 sidecar 和 target overlay 写入独立目录。
 
-仓库只保存代码、配置和数据合同，不提交原始数据、生成的 `work/`、模型权重或认证 token。原始数据只读，所有索引、统计和 canonical sidecar 写入 `work/`。
+## Source 与 Target
 
-> 当前能力边界：九个数据源均有 adapter 和真实样本回归，但“样本级通过”不等于“九库全量生产训练已完成”。当前验收结果以 [Validation Status](docs/reference/VALIDATION_STATUS.md) 为准，后续执行顺序以 [Roadmap](docs/ROADMAP.md) 为准。
+支持的 source adapter：
 
-## 统一合同
+- OXE / Open X-Embodiment、OXE-AugE
+- AgiBot-Beta、RoboCOIN、RoboMIND
+- Galaxea、InternData-A1
+- LingBot-VA RoboTwin/LIBERO data
+- DreamZero-DROID data
 
-每个训练窗口统一为：
+支持的模型 target：
 
-- 控制时间线：20 Hz，`81` 个 state 点和 `80` 个 action transition，共 4 秒。
-- 视频时间线：offset `0, 4, ..., 80`，共 `21` 帧。
-- 机器人向量：保留 native 数值，同时映射为 strict `80D` canonical state/action。
-- 有效维度：必须读取 `state_dim_valid_mask` 和 `action_dim_valid_mask`；canonical 中的零值不代表该维度存在。
-- 相机：按语义角色映射到五个固定 slot，不依赖源目录或字段顺序。
-- 数据分级：A 级可用于 video + action，B 级只用于 video，C 级拒绝。
-- 切分：以 episode/lineage 为单位，防止相邻窗口或增强副本跨 train/validation 泄漏。
+| Target | 训练格式 | 当前实现 |
+|---|---|---|
+| FastWAM | 81 state / 80 action / 21 video，80D canonical + mask | 完整 pipeline |
+| old LingBot-VA | LeRobot v2 + `action_config` + 30D channel contract + VAE latent | metadata/action/latent-job preparation；latent 需模型环境提取 |
+| DreamZero | LeRobot v2 + GEAR modality/stats + Hydra profile | metadata/stats/config preparation；新 embodiment 需上游注册 |
 
-## 快速开始
+> 重要边界：`lingbot_va.py` 和 `dreamzero.py` 是 **source adapter**；`targets/lingbot_va/` 和 `targets/dreamzero/` 才是对应模型的 **target exporter**。旧版 LingBot-VA 与 LingBot-VLA-v2 也不是同一个模型。详见 [Target 输出索引](docs/targets/README.md)。
+
+## 安装
 
 ```bash
 git clone git@github.com:yizhiqianbi/Process_WM_Data.git
@@ -37,66 +33,103 @@ cd Process_WM_Data
 python3 -m venv .venv
 source .venv/bin/activate
 python3 -m pip install -r requirements.txt
+```
 
+## FastWAM Pipeline
+
+```bash
 export FASTWAM_DATA_ROOT=/path/to/robot_dataset
+
 python3 scripts/run_pipeline.py \
   --datasets robocoin galaxea \
   --max-episodes 20 \
   --verify-files
 ```
 
-运行全部 adapter：
+处理阶段：
+
+```text
+scan -> clean -> materialize -> windows -> cases
+```
+
+核心输出为 `TrainingCaseV1`：20 Hz、81/80/21、80D state/action、逐维 valid mask、五个语义相机 slot，以及 A/B/C admission。
+
+## Old LingBot-VA Target
+
+输入必须是 LeRobot v2。下面以 15D 右臂自采数据为例：
 
 ```bash
-python3 scripts/run_pipeline.py \
-  --datasets all \
-  --workers 2 \
+python3 scripts/prepare_lingbot_va_target.py prepare \
+  --source-root /data/take_wrong_item_right_arm_v2 \
+  --output-root /data/targets/take_wrong_item_lingbot_va \
+  --profile take_wrong_item_right_arm \
+  --train-episodes-file /data/splits/train_episodes.txt \
   --verify-files
 ```
 
-第一轮全量处理不建议启用 `--decode-videos`。先用 manifest 和稀疏视觉检查过滤 C 级数据，再安排完整视频解码。
+它会把 `[0:7] + [14]` 压缩成 8D source action，并映射到旧版 LingBot-VA 的 right-joint channels `21..27` 和 right-gripper channel `29`。同时生成 `action_config`、q01/q99、model profile 和 VAE latent jobs。
 
-## 处理阶段
+latent 提取完成后：
 
-| 阶段 | 输入 | 主要输出 |
-|---|---|---|
-| `scan` | 原始数据 | `episodes.jsonl`、artifact 索引、源 schema |
-| `clean` | scan manifest | A/B/C 质量等级、坏区间、action admission |
-| `materialize` | clean manifest | 20 Hz canonical state/action、80D mask、源帧对齐 |
-| `windows` | canonical episode | 可用 81/80/21 窗口范围 |
-| `cases` | window manifest | `TrainingCaseV1`、loss mask、split、normalization domain |
+```bash
+python3 scripts/prepare_lingbot_va_target.py validate \
+  --root /data/targets/take_wrong_item_lingbot_va \
+  --require-latents \
+  --verify-files
+```
 
-各阶段可以独立运行，也可以由 `scripts/run_pipeline.py` 串联。数据集专用入口位于 `scripts/preprocess_*.py`。
+## DreamZero Target
+
+```bash
+python3 scripts/prepare_dreamzero_target.py prepare \
+  --source-root /data/take_wrong_item_right_arm_v2 \
+  --output-root /data/targets/take_wrong_item_dreamzero \
+  --profile take_wrong_item_right_arm \
+  --verify-files
+```
+
+它会生成 GEAR `modality.json`、embodiment、absolute/relative stats、语言列和 Hydra patch。自定义 embodiment 的 patch 合并进官方 DreamZero checkout 前，输出会保持 `ready_for_training=false`。
+
+## 非破坏输出
+
+两个新增 target 默认使用 `--link-mode symlink`：
+
+- `meta/` 独立复制和更新。
+- 未修改的大体积 `data/`、`videos/` 使用链接。
+- 需要 action 压缩或增加语言列时，只重写输出 Parquet。
+- 输出先写 staging，再原子 rename；已存在的目标目录不会覆盖。
+
+可改用 `--link-mode hardlink` 或 `--link-mode copy`。
 
 ## 文档入口
 
-完整导航见 [Documentation Index](docs/README.md)。建议按以下顺序阅读：
+完整导航见 [Documentation Index](docs/README.md)。主要入口：
 
-1. [Validation Status](docs/reference/VALIDATION_STATUS.md)：哪些结果已验证，哪些仍是待办。
-2. [Roadmap](docs/ROADMAP.md)：FastWAM 三阶段训练的实际推进顺序和门槛。
-3. [Preprocessing](docs/data/PREPROCESSING.md)：清洗分层、坏区间、窗口准入和阈值校准。
-4. [Action Admission](docs/data/ACTION_ADMISSION.md)：每个数据源为何能或不能进入 action loss。
-5. [FastWAM Data Interface](docs/training/FASTWAM_DATA_INTERFACE.md)：`TrainingCaseV1` 到模型 batch/loss 的合同。
-6. [FastWAM Three-Stage Training](docs/training/FASTWAM_THREE_STAGE.md)：Stage 1/2/3、memory 和 checkpoint 交接。
-
-下载、AgiBot、LingBot-VA 与 DreamZero 的专题说明也统一放在 `docs/` 下。
+1. [Target 输出索引](docs/targets/README.md)
+2. [FastWAM Target](docs/targets/FASTWAM.md)
+3. [Old LingBot-VA Target](docs/targets/LINGBOT_VA.md)
+4. [DreamZero Target](docs/targets/DREAMZERO.md)
+5. [统一清洗管线](docs/data/PREPROCESSING.md)
+6. [当前验收状态](docs/reference/VALIDATION_STATUS.md)
 
 ## 仓库结构
 
 ```text
-configs/                 数据集、清洗和训练 profile
-fastwam_preprocess/      adapter、清洗、materialize 与统一合同实现
-scripts/                 下载、预处理、统计、校验和训练辅助脚本
-tests/                   单元测试和真实 schema 回归
-docs/                    文档索引、路线图和专题文档
-work/                    本地生成物，不提交 Git
+configs/targets/          模型 target profiles 与固定上游 revision
+fastwam_preprocess/       source adapter、清洗和 FastWAM canonical 实现
+targets/                  FastWAM、old LingBot-VA、DreamZero target 代码
+scripts/                  下载、清洗、target preparation 和验证入口
+tests/                    单元测试与真实 schema 回归
+docs/                     数据、target、训练和状态文档
+work/                     本地生成物，不提交 Git
 ```
 
-## 验证
+## 验证与导出
 
 ```bash
 python3 -m unittest discover -s tests -v
-python3 -m compileall -q fastwam_preprocess scripts
+python3 -m compileall -q fastwam_preprocess targets scripts
+scripts/export_code.sh /tmp/Process_WM_Data.tar.gz
 ```
 
-生产训练前还必须完成：固定数据 revision、全量文件校验、train-only normalization stats、真实视频解码抽检，以及 FastWAM checkpoint/resume 回归。具体门槛见 [Roadmap](docs/ROADMAP.md)。
+当前全量下载、九库生产训练、LingBot-VA latent 提取和 DreamZero 新 embodiment 训练分别有独立 readiness gate，不能用“脚本运行成功”替代模型可训练结论。

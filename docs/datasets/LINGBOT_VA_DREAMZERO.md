@@ -1,4 +1,4 @@
-# LingBot-VA and DreamZero to FastWAM
+# LingBot-VA and DreamZero Source Data to FastWAM
 
 [文档索引](../README.md)
 
@@ -6,7 +6,10 @@
 action/state 映射、清洗门槛、下载方式和已完成验证。这里处理的是数据，不包含
 LingBot-VA、DreamZero 或其他模型权重。
 
-这里的 LingBot-VA 是数据源，不是 LingBot-VLA v2 模型。整体通过/待验状态统一见
+这里的 `lingbot_va` 和 `dreamzero` 是 FastWAM source adapter 名称，不是模型 target
+exporter。旧版 `Robbyant/lingbot-va` 和 DreamZero 的模型专用输出分别见
+[Old LingBot-VA Target](../targets/LINGBOT_VA.md) 与
+[DreamZero Target](../targets/DREAMZERO.md)。整体通过/待验状态统一见
 [Validation Status](../reference/VALIDATION_STATUS.md)。
 
 ## 1. 实现范围

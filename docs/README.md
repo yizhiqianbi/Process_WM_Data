@@ -1,14 +1,23 @@
 # 文档索引
 
-本目录是 `Process_WM_Data` 的统一文档入口。文档按职责拆分，避免同一个状态、命令或合同在多个文件中维护。
+本目录是 `Process_WM_Data` 的统一文档入口。文档按 source data、清洗、model target、训练和状态拆分，避免同一个状态、命令或合同在多个文件中维护。
 
 ## 名词边界
 
-- **LingBot-VA**：本仓库处理的数据源，包括 RoboTwin 和 LIBERO 等上游数据。
+- **LingBot-VA source data**：RoboTwin/LIBERO 等被 source adapter 读取的数据。
+- **old LingBot-VA target**：`Robbyant/lingbot-va` 模型的 LeRobot/action_config/latent 训练合同。
 - **LingBot-VLA v2**：`Robbyant/lingbot-vla-v2` 模型及独立微调仓库，不是本仓库的 dataset adapter。
 - **FastWAM**：消费 `TrainingCaseV1` 的 world + action model；其模型代码和 checkpoint 不存放在本仓库。
+- **DreamZero target**：`dreamzero0/dreamzero` 的 GEAR modality、relative stats 和 Hydra 合同。
 
-三者可以共享原始机器人数据，但不能混用 normalization stats、action padding、视频输入布局或 checkpoint。
+这些模型可以共享原始机器人数据，但不能混用 normalization stats、action padding、视频输入布局或 checkpoint。
+
+## Model Target
+
+1. [Target 输出总览](targets/README.md)
+2. [FastWAM](targets/FASTWAM.md)
+3. [old LingBot-VA](targets/LINGBOT_VA.md)
+4. [DreamZero](targets/DREAMZERO.md)
 
 ## 建议阅读路径
 
@@ -39,6 +48,9 @@
 | [Action Admission](data/ACTION_ADMISSION.md) | 每个数据源的 action 语义、映射证据和降级原因 |
 | [AgiBot](datasets/AGIBOT.md) | AgiBot HDF5 join、proprio mapping、统计和训练注意事项 |
 | [LingBot-VA / DreamZero](datasets/LINGBOT_VA_DREAMZERO.md) | 两个扩展数据源的 schema、相机、action 和真实样本结果 |
+| [Target Overview](targets/README.md) | source adapter 与模型 target 的边界和 readiness 规则 |
+| [Old LingBot-VA Target](targets/LINGBOT_VA.md) | 30D channel、action_config、quantile stats 和 VAE latent jobs |
+| [DreamZero Target](targets/DREAMZERO.md) | GEAR modality、relative stats、语言和 Hydra patch |
 | [FastWAM Data Interface](training/FASTWAM_DATA_INTERFACE.md) | `TrainingCaseV1 -> batch -> loss` 的稳定接口合同 |
 | [FastWAM Three-Stage](training/FASTWAM_THREE_STAGE.md) | Stage 1/2/3、memory、参数冻结和 checkpoint 交接 |
 
@@ -51,6 +63,7 @@
 - 下载命令和 revision 只维护在 `data/DOWNLOAD.md`。
 - 清洗阈值和算法只维护在 `data/PREPROCESSING.md` 及版本化 YAML。
 - 每库 action 语义和证据只维护在 `data/ACTION_ADMISSION.md` 或数据集专题文档。
+- 模型专用输出合同只维护在 `targets/` 文档和 `configs/targets/`。
 - FastWAM batch/loss 字段只维护在 `training/FASTWAM_DATA_INTERFACE.md`。
 - 三阶段模型结构和 checkpoint 规则只维护在 `training/FASTWAM_THREE_STAGE.md`。
 
