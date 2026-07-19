@@ -1,13 +1,13 @@
-# FastWAM 天机全采集数据去鱼眼过拟合
+# FastWAM 天机全采集数据原始鱼眼域过拟合
 
 [文档索引](../README.md)
 
 更新日期：2026-07-19
 
-本文定义 `take_wrong_item_right_arm` 的新一轮 FastWAM memorization 实验：先把三路训练画面从
-鱼眼投影转换为统一的虚拟针孔视角，再让 44 条采集轨迹共同参与训练，并同时输出想象视频、
-真实执行视频和动作曲线。它替代“只在一个 81 帧窗口上训练”的正式目标，但保留单窗口实验作为
-训练链路诊断，见 [FastWAM 天机单窗口过拟合](FASTWAM_TIANJI_OVERFIT.md)。
+本文定义 `take_wrong_item_right_arm` 的 FastWAM memorization 实验：三路训练画面保留采集时的
+原始鱼眼域，让 44 条采集轨迹共同参与训练，并为固定 probe 输出严格同步的推理视频与真实视频
+pair。它替代“只在一个 81 帧窗口上训练”的正式目标，但保留单窗口实验作为训练链路诊断，见
+[FastWAM 天机单窗口过拟合](FASTWAM_TIANJI_OVERFIT.md)。
 
 ## 1. 旧实验与新实验的边界
 
@@ -50,33 +50,24 @@
 
 部署时也必须按该表绑定物理画面，不能仅根据 key 名推断相机位置。
 
-## 3. 鱼眼到虚拟针孔
+## 3. 保留原始鱼眼域
 
-### 3.1 当前证据边界
+### 3.1 当前训练策略
 
-源数据只有 960x744 视频，没有厂家内参或标定板结果；manifest 明确记录
-`intrinsics_available=false`。因此当前配置是经过真实画面检查的**近似投影**，不是测量标定：
-
-```text
-source model: OpenCV fisheye / equidistant
-source image: 744 x 960
-fx = fy = 960 / pi = 305.5774907364
-cx = 479.5, cy = 371.5
-D = [0, 0, 0, 0]
-assumed full horizontal fisheye FOV = 180 degrees
-virtual pinhole horizontal FOV = 110 degrees
-```
-
-版本化配置为：
+四路源视频都是 960x744 鱼眼画面，manifest 记录 `intrinsics_available=false`。当前目标是先验证
+FastWAM 能否联合记忆现有全部采集数据，因此不再对画面做虚拟针孔投影，也不在
+`dataset_overfit` 中设置 `camera_rectification_config`。模型训练和评测看到的都是同一个原始域：
 
 ```text
-configs/cameras/tianji_xdof_fisheye_approx_v1.json
-SHA256 58bd5d2dcf471e33f95243a32577ae871081669c6af288c43c383ba95eea765d
+target video: raw fisheye
+memory 8/2/1: raw fisheye
+conditioning first frame: raw fisheye
+GT execution: raw fisheye
+FastWAM imagination target domain: raw fisheye
 ```
 
-该参数能把货架立柱、门框等直线恢复为近似直线，并保留主相机中的双臂和操作区域。真实部署前
-仍应对四个物理相机分别做棋盘格或 AprilTag 标定，用测量的 K/D 替换 profile；接口和训练命令
-无需变化。
+代码仍保留可选的相机校正接口，供以后拿到厂家内参或完成标定后做独立实验；它不是本轮训练
+配置的一部分。曾运行的 110 度虚拟针孔诊断不会续训到 raw-fisheye run，避免混合两种视觉分布。
 
 ### 3.2 loader 顺序
 
@@ -84,13 +75,12 @@ SHA256 58bd5d2dcf471e33f95243a32577ae871081669c6af288c43c383ba95eea765d
 
 ```text
 exact source frame decode
-  -> fisheye-to-pinhole grid_sample
   -> role-specific output size
   -> three-camera composite
   -> [-1, 1]
 ```
 
-虚拟投影直接生成最终 panel 分辨率，避免先生成 960x744 中间视频：
+每路 source frame 直接 resize 到对应 panel，再组成模型输入：
 
 ```text
 global:      256 x 320
@@ -99,27 +89,17 @@ right wrist: 128 x 160
 composite:   384 x 320
 ```
 
-同一个 rectification 同时作用于 21 个目标帧和 8/2/1 memory 帧，不会出现历史画面仍是鱼眼、
-未来画面已经去畸变的域错位。profile 未绑定的其他数据集保持原 resize；已绑定相机若输入尺寸
-不是 744x960 则立即报错，不会静默拉伸。
+21 个目标帧、首帧条件和 8/2/1 memory 帧走同一条 raw-fisheye 路径，不会出现历史画面与未来
+目标的域错位。
 
-### 3.3 预览与收据
+### 3.3 收据约束
 
-```bash
-/path/to/fastwam/python scripts/preview_fastwam_rectification.py \
-  --config work/tuning/take_wrong_item.local.yaml \
-  --phase dataset_overfit \
-  --sample-index 5 \
-  --output work/tuning/previews/tianji_sample_000005_fisheye_vs_pinhole.png
-```
-
-同名 JSON 记录 case、episode、window start、profile SHA 和三路 applied mask。当前真实样本结果：
+每个 eval JSON 必须明确证明没有启用相机投影：
 
 ```text
 camera_present_mask               = [true, true, true]
-camera_rectification_applied_mask = [true, true, true]
-case_id = f0760af5c9dfd420f5af1854
-window_start = 200
+camera_rectification_applied_mask = [false, false, false]
+camera_rectification.config       = null
 ```
 
 ## 4. 全数据展开与采样
@@ -212,9 +192,10 @@ data.train.max_samples=null
 ++data.train.sample_offset=0
 data.train.split=[train,validation]
 data.train.allowed_modes=[joint_video_action,video_only]
-++data.train.camera_rectification_config=...tianji_xdof_fisheye_approx_v1.json
 ++eval_fixed_indices=[5,87,180,239,318,377,441,480]
 ```
+
+同时必须确认命令中**没有** `camera_rectification_config`。
 
 真实两步 smoke：
 
@@ -223,7 +204,7 @@ python3 scripts/tune_models.py run \
   --config work/tuning/take_wrong_item.local.yaml \
   --model fastwam \
   --phase dataset_overfit \
-  --output-dir work/tuning/runs/fastwam_tianji_dataset_overfit_smoke \
+  --output-dir work/tuning/runs/fastwam_tianji_dataset_overfit_raw_smoke \
   --steps 2 \
   --gpus 0
 ```
@@ -247,14 +228,16 @@ python3 scripts/tune_models.py run \
 ```text
 *_imagination.mp4
 *_execution.mp4
+*_imagination_vs_execution.mp4
 *_action.mp4
 *_imagination_vs_execution_action.mp4
 *_actions.npz
 *.json
 ```
 
-- `imagination`：FastWAM 生成的 21 帧未来。
-- `execution`：同一首帧、同一时间窗的真实采集视频。
+- `imagination`：FastWAM 生成的 21 帧原始鱼眼域未来。
+- `execution`：同一首帧、同一时间窗的 21 帧真实采集视频。
+- `imagination_vs_execution`：本轮主 demo，左侧推理、右侧 GT，`640x416`、逐帧同步。
 - `action`：80 个 20 Hz action step；GT 为橙色，模型预测为青色，白色游标与 21 帧视频同步。
 - 合成视频：上方左右为 imagination / GT execution，下方为 8 个有效 slot 的动作曲线。
 - NPZ：同时保存 normalized 与反归一化 action、GT、预测及有效 mask，便于数值分析。
@@ -271,8 +254,8 @@ python3 scripts/tune_models.py run \
 数据与投影门槛：
 
 1. loader 报告 127 cases、486 windows。
-2. 三路 `camera_rectification_applied_mask` 均为 true。
-3. rectification profile SHA 与训练收据一致。
+2. 三路 `camera_rectification_applied_mask` 均为 false，且 config 为 null。
+3. 推理/GT pair 都是 21 帧、相同 FPS、相同窗口，没有跨 episode 拼接。
 4. 381 个 joint 窗口有 8 个有效 action/state slots；105 个 video-only 窗口 action loss 为零。
 
 训练门槛：
@@ -287,15 +270,16 @@ python3 scripts/tune_models.py run \
 
 ## 10. 真实 smoke 结果
 
-2026-07-19 在单张 H200 上完成 2-step 真实 smoke，launcher 状态为 `succeeded`，耗时
-132.7 秒（包含模型加载和 step-0 的 8-probe diffusion suite）。训练进程实际报告：
+2026-07-19 在单张 H200 上完成 raw-fisheye 2-step 真实 smoke，launcher 状态为 `succeeded`，
+耗时 121.6 秒（包含模型加载和 step-0 的 8-probe diffusion suite）。训练进程实际报告：
 
 ```text
 cases=127
 windows=486
 samples_per_epoch=486
 train/val dataset size=486/486
-camera rectification mask=[true,true,true]
+camera rectification mask=[false,false,false]
+camera rectification config=null
 memory_valid_ratio=1.0
 ```
 
@@ -303,16 +287,16 @@ Stage-2 初始化的 8-probe step-0 均值为：
 
 | 指标 | 值 |
 |---|---:|
-| val loss | 0.87821 |
-| rollout vs GT PSNR | 9.08738 dB |
-| rollout vs GT SSIM | 0.15276 |
-| action L1 | 0.35710 |
-| action MSE | 0.25557 |
+| val loss | 0.85796 |
+| rollout vs GT PSNR | 11.19127 dB |
+| rollout vs GT SSIM | 0.18891 |
+| action L1 | 0.35885 |
+| action MSE | 0.25942 |
 
-8 条 probe 全部生成三联诊断、imagination、execution、action 和组合视频。组合视频已经通过
-容器与像素检查：H.264、640x640、5 FPS、21 帧；上方是两个 320x416 标注视频，下方是
-640x224 动作图。smoke 最终写出 `step_000002.pt`，证明 rectified full-dataset loader、backward、
-optimizer 和 artifact 编码链路均可执行。
+8 条 probe 全部生成三联诊断、imagination、execution、pair、action 和组合视频。主 pair 已通过
+容器与像素检查：H.264、640x416、5 FPS、21 帧、4.2 秒；左侧是 imagination，右侧是同一窗口
+GT。带 action 的组合视频仍为 640x640。smoke 最终写出 `step_000002.pt`，证明 raw-fisheye
+full-dataset loader、backward、optimizer 和 pair 编码链路均可执行。
 
 正式 10,000-step run 输出目录为：
 

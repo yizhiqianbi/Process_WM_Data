@@ -1069,7 +1069,7 @@ index bb8ae13..d08ffe4 100644
          video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
          video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
 diff --git a/src/fastwam/trainer.py b/src/fastwam/trainer.py
-index 75e0f2e..2b87edd 100644
+index 75e0f2e..bee37c6 100644
 --- a/src/fastwam/trainer.py
 +++ b/src/fastwam/trainer.py
 @@ -11,7 +11,7 @@ import numpy as np
@@ -1081,15 +1081,18 @@ index 75e0f2e..2b87edd 100644
  from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
  from torch.utils.data import DataLoader
  
-@@ -20,6 +20,7 @@ from .utils.logging_config import get_logger, setup_logging
+@@ -20,6 +20,10 @@ from .utils.logging_config import get_logger, setup_logging
  from .utils.pytorch_utils import set_global_seed
  from .utils.samplers import ResumableEpochSampler
  from .utils.video_io import save_mp4
-+from .utils.eval_visualization import imagination_execution_action_frames
++from .utils.eval_visualization import (
++    imagination_execution_action_frames,
++    imagination_execution_pair_frames,
++)
  from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_ssim
  
  logger = get_logger(__name__)
-@@ -29,20 +30,58 @@ class Wan22Trainer:
+@@ -29,20 +33,58 @@ class Wan22Trainer:
      def __init__(self, model, train_dataset, val_dataset=None, *, cfg: DictConfig):
          self.model = model
          self.train_dataset = train_dataset
@@ -1149,7 +1152,7 @@ index 75e0f2e..2b87edd 100644
          self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
          self.max_grad_norm = float(cfg.max_grad_norm)
          self.seed = int(cfg.seed)
-@@ -62,10 +101,16 @@ class Wan22Trainer:
+@@ -62,10 +104,16 @@ class Wan22Trainer:
              step_scheduler_with_optimizer=False,
          )
          
@@ -1167,7 +1170,7 @@ index 75e0f2e..2b87edd 100644
              self.accelerator.num_processes,
              self.accelerator.process_index,
              self.mixed_precision,
-@@ -81,11 +126,23 @@ class Wan22Trainer:
+@@ -81,11 +129,23 @@ class Wan22Trainer:
  
          # Freeze non-trainable modules before optimizer/deepspeed initialization.
          # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
@@ -1196,7 +1199,7 @@ index 75e0f2e..2b87edd 100644
          self.optimizer = torch.optim.AdamW(
              trainable_params,
              lr=self.learning_rate,
-@@ -170,6 +227,12 @@ class Wan22Trainer:
+@@ -170,6 +230,12 @@ class Wan22Trainer:
              seed=self.seed,
              batch_size=self.batch_size,
              num_processes=self.accelerator.num_processes,
@@ -1209,7 +1212,7 @@ index 75e0f2e..2b87edd 100644
          )
          return DataLoader(
              dataset,
-@@ -210,7 +273,7 @@ class Wan22Trainer:
+@@ -210,7 +276,7 @@ class Wan22Trainer:
  
          num_processes = max(int(self.accelerator.num_processes), 1)
          global_batch_size = max(self.batch_size * num_processes, 1)
@@ -1218,7 +1221,7 @@ index 75e0f2e..2b87edd 100644
          opt_steps_per_epoch = max(
              ceil(micro_steps_per_epoch / self.gradient_accumulation_steps),
              1,
-@@ -275,12 +338,23 @@ class Wan22Trainer:
+@@ -275,12 +341,23 @@ class Wan22Trainer:
              raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
          logger.info("Loading weight checkpoint only: %s", resume)
          self.accelerator.unwrap_model(self.model).load_checkpoint(str(resume_path), optimizer=None)
@@ -1245,7 +1248,7 @@ index 75e0f2e..2b87edd 100644
          self._apply_dit_only_train_mode(model)
  
      @staticmethod
-@@ -294,6 +368,48 @@ class Wan22Trainer:
+@@ -294,6 +371,48 @@ class Wan22Trainer:
              proprio_encoder.train()
              proprio_encoder.requires_grad_(True)
  
@@ -1294,7 +1297,7 @@ index 75e0f2e..2b87edd 100644
      @staticmethod
      def _to_batched_eval_sample(sample):
          video = sample["video"]
-@@ -363,7 +479,7 @@ class Wan22Trainer:
+@@ -363,7 +482,7 @@ class Wan22Trainer:
                      f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                  )
  
@@ -1303,7 +1306,7 @@ index 75e0f2e..2b87edd 100644
              "video": video,
              "prompt": prompt,
              "action": action,
-@@ -372,9 +488,181 @@ class Wan22Trainer:
+@@ -372,9 +491,186 @@ class Wan22Trainer:
              "context_mask": context_mask,
              "action_horizon": action_horizon,
          }
@@ -1449,6 +1452,11 @@ index 75e0f2e..2b87edd 100644
 +                    for record in probe_results
 +                    if record.get("execution_video_path")
 +                ],
++                "imagination_vs_execution_video_paths": [
++                    record["imagination_vs_execution_video_path"]
++                    for record in probe_results
++                    if record.get("imagination_vs_execution_video_path")
++                ],
 +                "action_video_paths": [
 +                    record["action_video_path"]
 +                    for record in probe_results
@@ -1485,7 +1493,7 @@ index 75e0f2e..2b87edd 100644
          if self.val_dataset is None:
              return None
  
-@@ -382,15 +670,39 @@ class Wan22Trainer:
+@@ -382,15 +678,39 @@ class Wan22Trainer:
          was_dit_training = model.dit.training
          model.eval()
  
@@ -1531,7 +1539,7 @@ index 75e0f2e..2b87edd 100644
          
          prompt = sample["prompt"][0]
          video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
-@@ -409,7 +721,7 @@ class Wan22Trainer:
+@@ -409,7 +729,7 @@ class Wan22Trainer:
              "text_cfg_scale": 1.0,
              "action_cfg_scale": 1.0,
              "num_inference_steps": self.eval_num_inference_steps,
@@ -1540,7 +1548,7 @@ index 75e0f2e..2b87edd 100644
              "tiled": False,
          }
          if sample["context"] is not None:
-@@ -418,6 +730,18 @@ class Wan22Trainer:
+@@ -418,6 +738,18 @@ class Wan22Trainer:
              infer_kwargs["context_mask"] = sample["context_mask"][0]
          else:
              infer_kwargs["prompt"] = prompt
@@ -1559,15 +1567,32 @@ index 75e0f2e..2b87edd 100644
  
          pred = model.infer(
              **infer_kwargs,
-@@ -440,58 +764,181 @@ class Wan22Trainer:
+@@ -440,58 +772,190 @@ class Wan22Trainer:
  
          action_l1 = None
          action_l2 = None
 +        action_metric_space = None
 +        action_l1_by_slot = None
 +        action_artifact = None
-+        imagination_path = None
-+        execution_path = None
++        imagination_frames, execution_frames, imagination_execution_demo = (
++            imagination_execution_pair_frames(pred_video_tensor, gt_video_tensor)
++        )
++        imagination_path = os.path.join(
++            self.eval_dir, f"{artifact_stem}_imagination.mp4"
++        )
++        execution_path = os.path.join(
++            self.eval_dir, f"{artifact_stem}_execution.mp4"
++        )
++        imagination_execution_path = os.path.join(
++            self.eval_dir, f"{artifact_stem}_imagination_vs_execution.mp4"
++        )
++        save_mp4(imagination_frames, imagination_path, fps=self.eval_video_fps)
++        save_mp4(execution_frames, execution_path, fps=self.eval_video_fps)
++        save_mp4(
++            imagination_execution_demo,
++            imagination_execution_path,
++            fps=self.eval_video_fps,
++        )
 +        action_video_path = None
 +        imagination_execution_action_path = None
 +        pred_metric = None
@@ -1761,12 +1786,6 @@ index 75e0f2e..2b87edd 100644
 +                action,
 +                valid_dimensions=valid_dimensions,
 +            )
-+            imagination_path = os.path.join(
-+                self.eval_dir, f"{artifact_stem}_imagination.mp4"
-+            )
-+            execution_path = os.path.join(
-+                self.eval_dir, f"{artifact_stem}_execution.mp4"
-+            )
 +            action_video_path = os.path.join(
 +                self.eval_dir, f"{artifact_stem}_action.mp4"
 +            )
@@ -1774,8 +1793,6 @@ index 75e0f2e..2b87edd 100644
 +                self.eval_dir,
 +                f"{artifact_stem}_imagination_vs_execution_action.mp4",
 +            )
-+            save_mp4(imagination_frames, imagination_path, fps=self.eval_video_fps)
-+            save_mp4(execution_frames, execution_path, fps=self.eval_video_fps)
 +            save_mp4(action_frames, action_video_path, fps=self.eval_video_fps)
 +            save_mp4(
 +                imagination_execution_action_demo,
@@ -1785,7 +1802,7 @@ index 75e0f2e..2b87edd 100644
  
          # 4. VAE reconstruction metrics against GT video
          gt_video_batch = video0.unsqueeze(0).to(device=model.device, dtype=model.torch_dtype)
-@@ -510,20 +957,34 @@ class Wan22Trainer:
+@@ -510,20 +974,34 @@ class Wan22Trainer:
          psnr_rollout_vs_decode = video_psnr(pred=pred_video_tensor, target=vae_video_tensor)
          ssim_rollout_vs_decode = video_ssim(pred=pred_video_tensor, target=vae_video_tensor)
  
@@ -1827,7 +1844,7 @@ index 75e0f2e..2b87edd 100644
  
          local_metrics = torch.tensor(
              [
-@@ -562,6 +1023,67 @@ class Wan22Trainer:
+@@ -562,6 +1040,68 @@ class Wan22Trainer:
              result["action_l2"] = float(action_l2_mean)
          if action_l1_mean is not None:
              result["action_l1"] = float(action_l1_mean)
@@ -1837,9 +1854,10 @@ index 75e0f2e..2b87edd 100644
 +            result["action_l1_by_slot"] = action_l1_by_slot
 +        if action_artifact is not None:
 +            result["action_artifact"] = action_artifact
-+        if imagination_path is not None:
-+            result["imagination_video_path"] = imagination_path
-+            result["execution_video_path"] = execution_path
++        result["imagination_video_path"] = imagination_path
++        result["execution_video_path"] = execution_path
++        result["imagination_vs_execution_video_path"] = imagination_execution_path
++        if action_video_path is not None:
 +            result["action_video_path"] = action_video_path
 +            result["imagination_vs_execution_action_video_path"] = (
 +                imagination_execution_action_path
@@ -1895,7 +1913,7 @@ index 75e0f2e..2b87edd 100644
          return result
  
      def _save_weights_checkpoint(self, step_tag: str):
-@@ -590,6 +1112,9 @@ class Wan22Trainer:
+@@ -590,6 +1130,9 @@ class Wan22Trainer:
          self.accelerator.wait_for_everyone()
  
          state_path = os.path.join(self.state_dir, step_tag)
@@ -1905,7 +1923,7 @@ index 75e0f2e..2b87edd 100644
          ensure_dir(state_path)
          self.accelerator.save_state(output_dir=state_path)
          if self.accelerator.is_main_process:
-@@ -652,9 +1177,23 @@ class Wan22Trainer:
+@@ -652,9 +1195,23 @@ class Wan22Trainer:
              raise ValueError("`max_steps` must be set before entering the while-step training loop.")
  
          logger.info("Starting training with max_steps=%d.", self.max_steps)
@@ -1930,7 +1948,7 @@ index 75e0f2e..2b87edd 100644
  
          while self.global_step < self.max_steps:
              try:
-@@ -690,7 +1229,7 @@ class Wan22Trainer:
+@@ -690,7 +1247,7 @@ class Wan22Trainer:
                          global_loss_metrics[key] = float(
                              self.accelerator.gather(metric_tensor).mean().item()
                          )
@@ -1939,7 +1957,7 @@ index 75e0f2e..2b87edd 100644
                      global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
  
                      current_lr = float(self.optimizer.param_groups[0]["lr"])
-@@ -733,11 +1272,11 @@ class Wan22Trainer:
+@@ -733,11 +1290,11 @@ class Wan22Trainer:
                          metrics = self.evaluate()
                          self.accelerator.wait_for_everyone()
                          if metrics is not None and self.accelerator.is_main_process:
@@ -1954,7 +1972,7 @@ index 75e0f2e..2b87edd 100644
                              )
                              if "action_l2" in metrics:
                                  description += " action_l2=%.4f" % metrics["action_l2"]
-@@ -759,6 +1298,7 @@ class Wan22Trainer:
+@@ -759,6 +1316,7 @@ class Wan22Trainer:
                                  eval_payload["eval/action_l1"] = float(metrics["action_l1"])
                              self._wandb_log(eval_payload)
  
@@ -1962,7 +1980,7 @@ index 75e0f2e..2b87edd 100644
                      if self.save_every > 0 and self.global_step % self.save_every == 0:
                          ckpt_info = self.save_checkpoint()
                          if self.accelerator.is_main_process:
-@@ -770,7 +1310,8 @@ class Wan22Trainer:
+@@ -770,7 +1328,8 @@ class Wan22Trainer:
                              )
  
                      if self.global_step >= self.max_steps:
@@ -5613,10 +5631,10 @@ index 0000000..169819f
 +        return payload
 diff --git a/src/fastwam/utils/eval_visualization.py b/src/fastwam/utils/eval_visualization.py
 new file mode 100644
-index 0000000..0a96dcf
+index 0000000..99937e8
 --- /dev/null
 +++ b/src/fastwam/utils/eval_visualization.py
-@@ -0,0 +1,196 @@
+@@ -0,0 +1,216 @@
 +from __future__ import annotations
 +
 +from typing import Sequence
@@ -5777,6 +5795,30 @@ index 0000000..0a96dcf
 +    return frames
 +
 +
++def imagination_execution_pair_frames(
++    pred_video: torch.Tensor,
++    gt_video: torch.Tensor,
++) -> tuple[list[Image.Image], list[Image.Image], list[Image.Image]]:
++    imagination = labeled_video_frames(pred_video, "IMAGINATION")
++    execution = labeled_video_frames(gt_video, "GROUND TRUTH EXECUTION")
++    if len(imagination) != len(execution):
++        raise ValueError("Predicted and ground-truth videos have different frame counts.")
++    pair: list[Image.Image] = []
++    for imagination_frame, execution_frame in zip(imagination, execution):
++        frame = Image.new(
++            "RGB",
++            (
++                imagination_frame.width + execution_frame.width,
++                max(imagination_frame.height, execution_frame.height),
++            ),
++            color=(16, 16, 16),
++        )
++        frame.paste(imagination_frame, (0, 0))
++        frame.paste(execution_frame, (imagination_frame.width, 0))
++        pair.append(frame)
++    return imagination, execution, pair
++
++
 +def imagination_execution_action_frames(
 +    pred_video: torch.Tensor,
 +    gt_video: torch.Tensor,
@@ -5785,10 +5827,9 @@ index 0000000..0a96dcf
 +    *,
 +    valid_dimensions: torch.Tensor | Sequence[bool] | None,
 +) -> tuple[list[Image.Image], list[Image.Image], list[Image.Image], list[Image.Image]]:
-+    imagination = labeled_video_frames(pred_video, "IMAGINATION")
-+    execution = labeled_video_frames(gt_video, "GROUND TRUTH EXECUTION")
-+    if len(imagination) != len(execution):
-+        raise ValueError("Predicted and ground-truth videos have different frame counts.")
++    imagination, execution, pair = imagination_execution_pair_frames(
++        pred_video, gt_video
++    )
 +    action = action_trace_frames(
 +        pred_action,
 +        gt_action,
@@ -5797,33 +5838,31 @@ index 0000000..0a96dcf
 +        width=imagination[0].width + execution[0].width,
 +    )
 +    combined: list[Image.Image] = []
-+    for imagination_frame, execution_frame, action_frame in zip(
-+        imagination, execution, action
-+    ):
++    for pair_frame, action_frame in zip(pair, action):
 +        frame = Image.new(
 +            "RGB",
 +            (
-+                imagination_frame.width + execution_frame.width,
-+                imagination_frame.height + action_frame.height,
++                pair_frame.width,
++                pair_frame.height + action_frame.height,
 +            ),
 +            color=(16, 16, 16),
 +        )
-+        frame.paste(imagination_frame, (0, 0))
-+        frame.paste(execution_frame, (imagination_frame.width, 0))
-+        frame.paste(action_frame, (0, imagination_frame.height))
++        frame.paste(pair_frame, (0, 0))
++        frame.paste(action_frame, (0, pair_frame.height))
 +        combined.append(frame)
 +    return imagination, execution, action, combined
 diff --git a/tests/test_eval_visualization.py b/tests/test_eval_visualization.py
 new file mode 100644
-index 0000000..4bf546e
+index 0000000..72d3b1e
 --- /dev/null
 +++ b/tests/test_eval_visualization.py
-@@ -0,0 +1,42 @@
+@@ -0,0 +1,57 @@
 +import torch
 +
 +from fastwam.utils.eval_visualization import (
 +    action_trace_frames,
 +    imagination_execution_action_frames,
++    imagination_execution_pair_frames,
 +)
 +
 +
@@ -5861,6 +5900,20 @@ index 0000000..4bf546e
 +
 +    assert len(frames) == 21
 +    assert frames[0].size == (640, 224)
++
++
++def test_imagination_execution_pair_has_stable_dimensions():
++    pred_video = torch.zeros((3, 21, 384, 320), dtype=torch.float32)
++    gt_video = torch.ones_like(pred_video)
++
++    imagination, execution, pair = imagination_execution_pair_frames(
++        pred_video, gt_video
++    )
++
++    assert len(imagination) == len(execution) == len(pair) == 21
++    assert imagination[0].size == (320, 416)
++    assert execution[0].size == (320, 416)
++    assert pair[0].size == (640, 416)
 diff --git a/tests/test_masked_losses.py b/tests/test_masked_losses.py
 new file mode 100644
 index 0000000..eb5da53

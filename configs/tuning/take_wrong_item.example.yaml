@@ -74,7 +74,6 @@ models:
         include_robot_supervision: true
         skip_dit_load_from_pretrain: true
         initial_checkpoint: "${FASTWAM_STAGE2_MEMORY_CKPT}"
-        camera_rectification_config: "${PROCESS_WM_DATA_REPO}/configs/cameras/tianji_xdof_fisheye_approx_v1.json"
         sample_offset: 0
         max_samples: null
         batch_size: 1
