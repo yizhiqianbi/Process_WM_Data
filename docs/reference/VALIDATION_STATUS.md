@@ -30,10 +30,13 @@ from this repository.
 | Unified three-model launcher | Passed | Structured argv, external SHA, logs, receipts, checkpoint discovery and explicit resume |
 | FastWAM self-data optimizer/resume | Passed | Real step 1, full-state resume to step 2, action/video/memory losses finite |
 | FastWAM Tianji fixed-window overfit | Passed | Step 300 first passes; selected cumulative step 900: 26.8693 dB, 0.9313 SSIM, action L1 0.01941; memory fully valid |
+| Tianji fisheye-to-pinhole loader | Sample-validated | Real 960x744 inputs, 110-degree virtual pinhole, `[true,true,true]` rectification mask, 486-window dataset preserved |
+| Tianji dataset-overfit plan | Training-validated smoke | 44 episodes, 486 windows, 8 fixed cross-episode probes; real 2-step optimizer/checkpoint passed, convergence pending |
+| FastWAM imagination/action demo | Training-validated smoke | 8 real probe suites produced separate imagination, execution, action and combined 640x640/21-frame videos |
 | Old LingBot-VA optimizer/resume | Passed on one complete three-view latent segment | Real step 1, optimizer/scheduler resume to step 2, latent/action losses finite |
 | DreamZero optimizer/resume | Passed | Real LoRA step 1, Trainer resume to step 2, dynamics/action losses finite |
-| Repository tests | Passed | 56 tests, including fixed-sample reports, continuation baselines and loss overrides |
-| FastWAM integration tests | Passed | 21 tests in the connected FastWAM checkout, including padded-action inference |
+| Repository tests | Passed | 58 tests, including full-dataset planning, rectification launcher and fixed-sample reports |
+| FastWAM integration tests | Passed | 26 tests in connected and clean-patch checkouts, including rectification, action video and padded-action inference |
 | AgiBot-specific optimizer/checkpoint smoke | Pending dataset-specific run | The current optimizer proof uses `take_wrong_item_right_arm`, not AgiBot |
 | Full nine-domain production stats | Pending full manifests | Validation stats currently cover only locally materialized train/A/joint domains |
 

@@ -51,6 +51,8 @@ added_files=(
   src/fastwam/datasets/memory_bank.py
   src/fastwam/datasets/training_case_dataset.py
   src/fastwam/models/wan22/memory_fastwam.py
+  src/fastwam/utils/eval_visualization.py
+  tests/test_eval_visualization.py
   tests/test_masked_losses.py
   tests/test_memory_fastwam.py
   tests/test_samplers.py

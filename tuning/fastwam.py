@@ -119,14 +119,59 @@ def build_fastwam_command(
         f"data.train.allowed_modes={hydra_list(allowed_modes)}",
         f"data.train.allowed_quality_tiers={hydra_list(allowed_tiers)}",
         f"data.train.include_robot_supervision={str(include_robot).lower()}",
-        f"data.train.max_samples={int(phase_cfg.get('max_samples', 1))}",
         "wandb.enabled=false",
     ]
-    for key in ("sample_offset", "sample_stride", "sample_offset_per_case"):
+    if "max_samples" in phase_cfg:
+        max_samples = phase_cfg["max_samples"]
+        argv.append(
+            "data.train.max_samples=null"
+            if max_samples is None
+            else f"data.train.max_samples={int(max_samples)}"
+        )
+    for key in (
+        "sample_offset",
+        "sample_stride",
+        "sample_offset_per_case",
+        "max_samples_per_case",
+    ):
         if key in phase_cfg:
-            argv.append(f"data.train.{key}={int(phase_cfg[key])}")
+            argv.append(f"++data.train.{key}={int(phase_cfg[key])}")
+    selected_splits = phase_cfg.get("splits", phase_cfg.get("split"))
+    if selected_splits is not None:
+        if isinstance(selected_splits, str):
+            selected_splits = [selected_splits]
+        argv.append(
+            f"data.train.split={hydra_list([str(value) for value in selected_splits])}"
+        )
+    rectification = phase_cfg.get("camera_rectification_config") or model.get(
+        "camera_rectification_config"
+    )
+    if rectification:
+        rectification_path = Path(str(rectification)).expanduser().resolve()
+        if not rectification_path.is_file():
+            raise TuningConfigError(
+                f"FastWAM camera rectification config is missing: {rectification_path}"
+            )
+        argv.append(f"++data.train.camera_rectification_config={rectification_path}")
+    if phase_cfg.get("eval_fixed_index") is not None and phase_cfg.get(
+        "eval_fixed_indices"
+    ) is not None:
+        raise TuningConfigError(
+            "FastWAM phase may set only one of eval_fixed_index and eval_fixed_indices"
+        )
     if phase_cfg.get("eval_fixed_index") is not None:
         argv.append(f"eval_fixed_index={int(phase_cfg['eval_fixed_index'])}")
+    if phase_cfg.get("eval_fixed_indices") is not None:
+        eval_indices = [int(value) for value in phase_cfg["eval_fixed_indices"]]
+        if (
+            not eval_indices
+            or any(value < 0 for value in eval_indices)
+            or len(set(eval_indices)) != len(eval_indices)
+        ):
+            raise TuningConfigError(
+                "FastWAM eval_fixed_indices must be a non-empty list of unique non-negative integers"
+            )
+        argv.append(f"++eval_fixed_indices={hydra_list([str(value) for value in eval_indices])}")
     scalar_overrides = {
         "batch_size": int,
         "gradient_accumulation_steps": int,

@@ -1,0 +1,52 @@
+{
+  "schema_version": "fastwam-camera-rectification-v1",
+  "description": "Approximate equidistant projection for the 960x744 Tianji cameras. Replace with measured intrinsics before deployment.",
+  "profiles": {
+    "tianji_xdof_960x744_equidistant_approx": {
+      "model": "opencv_fisheye",
+      "calibration_status": "approximate_unverified_180deg_equidistant_assumption",
+      "image_size": [
+        744,
+        960
+      ],
+      "camera_matrix": [
+        [
+          305.57749073643903,
+          0.0,
+          479.5
+        ],
+        [
+          0.0,
+          305.57749073643903,
+          371.5
+        ],
+        [
+          0.0,
+          0.0,
+          1.0
+        ]
+      ],
+      "distortion_coefficients": [
+        0.0,
+        0.0,
+        0.0,
+        0.0
+      ],
+      "virtual_camera": {
+        "projection": "pinhole",
+        "horizontal_fov_degrees": 110.0
+      }
+    }
+  },
+  "bindings": {
+    "source_key": {
+      "observation.images.left_eye": "tianji_xdof_960x744_equidistant_approx",
+      "observation.images.right_eye": "tianji_xdof_960x744_equidistant_approx",
+      "observation.images.left_wrist": "tianji_xdof_960x744_equidistant_approx",
+      "observation.images.right_wrist": "tianji_xdof_960x744_equidistant_approx"
+    },
+    "role": {}
+  },
+  "default_profile": null,
+  "unmatched_policy": "identity"
+}

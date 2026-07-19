@@ -65,6 +65,39 @@ models:
         eval_at_start: true
         eval_use_train_dataset: true
         eval_video_fps: 5
+      dataset_overfit:
+        task: stage3_robocoin_memory_smoke
+        requires_memory_joint_inference: true
+        allowed_modes: [joint_video_action, video_only]
+        allowed_quality_tiers: [A]
+        splits: [train, validation]
+        include_robot_supervision: true
+        skip_dit_load_from_pretrain: true
+        initial_checkpoint: "${FASTWAM_STAGE2_MEMORY_CKPT}"
+        camera_rectification_config: "${PROCESS_WM_DATA_REPO}/configs/cameras/tianji_xdof_fisheye_approx_v1.json"
+        sample_offset: 0
+        max_samples: null
+        batch_size: 1
+        gradient_accumulation_steps: 1
+        learning_rate: 2.0e-5
+        reference_learning_rate: 1.0e-4
+        loss_lambda_video: 1.0
+        loss_lambda_action: 1.0
+        weight_decay: 0.0
+        max_grad_norm: 1.0
+        lr_scheduler_type: constant
+        sampling_strategy: uniform
+        num_workers: 2
+        log_every: 10
+        save_every: 500
+        save_training_state: false
+        eval_every: 2000
+        eval_num_inference_steps: 10
+        eval_seed: 42
+        eval_fixed_indices: [5, 87, 180, 239, 318, 377, 441, 480]
+        eval_at_start: true
+        eval_use_train_dataset: true
+        eval_video_fps: 5
 
   lingbot_va:
     repo: "${LINGBOT_VA_REPO}"

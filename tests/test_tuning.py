@@ -41,6 +41,8 @@ class TuningTest(unittest.TestCase):
         self.stage1.write_text("fixture")
         self.action = self.root / "action.pt"
         self.action.write_text("fixture")
+        self.rectification = self.root / "rectification.json"
+        self.rectification.write_text("{}\n")
 
     def tearDown(self) -> None:
         self.temp.cleanup()
@@ -85,6 +87,23 @@ class TuningTest(unittest.TestCase):
                             "eval_fixed_index": 0,
                             "eval_at_start": True,
                             "eval_use_train_dataset": True,
+                        },
+                        "dataset_overfit": {
+                            "task": "stage3_robocoin_memory_smoke",
+                            "requires_memory_joint_inference": True,
+                            "allowed_modes": ["joint_video_action", "video_only"],
+                            "allowed_quality_tiers": ["A"],
+                            "splits": ["train", "validation"],
+                            "include_robot_supervision": True,
+                            "skip_dit_load_from_pretrain": True,
+                            "initial_checkpoint": str(self.root / "stage2.pt"),
+                            "camera_rectification_config": str(self.rectification),
+                            "sample_offset": 0,
+                            "max_samples": None,
+                            "max_samples_per_case": 3,
+                            "sampling_strategy": "uniform",
+                            "num_workers": 2,
+                            "eval_fixed_indices": [5, 87, 180],
                         }
                     },
                 }
@@ -153,7 +172,7 @@ class TuningTest(unittest.TestCase):
         )
 
         self.assertIn("max_steps=300", spec.argv)
-        self.assertIn("data.train.sample_offset=1", spec.argv)
+        self.assertIn("++data.train.sample_offset=1", spec.argv)
         self.assertIn("data.train.max_samples=1", spec.argv)
         self.assertIn("eval_fixed_index=0", spec.argv)
         self.assertIn("eval_at_start=true", spec.argv)
@@ -180,6 +199,48 @@ class TuningTest(unittest.TestCase):
                 resume=None,
                 gpus="0",
             )
+
+    def test_fastwam_dataset_overfit_uses_all_splits_and_rectification(self) -> None:
+        model_source = self.repo / "src" / "fastwam" / "models" / "wan22"
+        model_source.mkdir(parents=True)
+        (model_source / "memory_fastwam.py").write_text(
+            "class MemoryFastWAM:\n"
+            "    def infer_joint(self, memory_video_long, memory_video_mid, "
+            "memory_video_short, memory_mask_long, memory_mask_mid, memory_mask_short):\n"
+            "        pass\n"
+            "    def infer(self, memory_video_long, memory_video_mid, memory_video_short, "
+            "memory_mask_long, memory_mask_mid, memory_mask_short):\n"
+            "        pass\n"
+        )
+        trainer_source = self.repo / "src" / "fastwam" / "trainer.py"
+        trainer_source.parent.mkdir(parents=True, exist_ok=True)
+        trainer_source.write_text(
+            "eval_fixed_index = eval_at_start = memory_video_long = True\n"
+        )
+        with patch.dict(os.environ, {"TEST_FASTWAM_REPO": str(self.repo)}):
+            config = load_tuning_config(self._write_config())
+
+        spec = build_fastwam_command(
+            config,
+            phase="dataset_overfit",
+            output_dir=self.root / "dataset-overfit-run",
+            steps=1000,
+            resume=None,
+            gpus="6",
+        )
+
+        self.assertIn("data.train.max_samples=null", spec.argv)
+        self.assertIn("++data.train.sample_offset=0", spec.argv)
+        self.assertIn("++data.train.max_samples_per_case=3", spec.argv)
+        self.assertIn("data.train.split=[train,validation]", spec.argv)
+        self.assertIn(
+            f"++data.train.camera_rectification_config={self.rectification.resolve()}",
+            spec.argv,
+        )
+        self.assertIn("data.train.allowed_modes=[joint_video_action,video_only]", spec.argv)
+        self.assertIn("sampling_strategy=uniform", spec.argv)
+        self.assertIn("num_workers=2", spec.argv)
+        self.assertIn("++eval_fixed_indices=[5,87,180]", spec.argv)
 
     def test_lingbot_builder_requires_complete_latents_unless_smoke_is_explicit(self) -> None:
         repo = self.root / "lingbot-va"

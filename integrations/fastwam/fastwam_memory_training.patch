@@ -1069,7 +1069,7 @@ index bb8ae13..d08ffe4 100644
          video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
          video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
 diff --git a/src/fastwam/trainer.py b/src/fastwam/trainer.py
-index 75e0f2e..a36b1b8 100644
+index 75e0f2e..2b87edd 100644
 --- a/src/fastwam/trainer.py
 +++ b/src/fastwam/trainer.py
 @@ -11,7 +11,7 @@ import numpy as np
@@ -1081,7 +1081,15 @@ index 75e0f2e..a36b1b8 100644
  from torch.optim.lr_scheduler import ConstantLR, CosineAnnealingLR, LinearLR, SequentialLR
  from torch.utils.data import DataLoader
  
-@@ -29,20 +29,46 @@ class Wan22Trainer:
+@@ -20,6 +20,7 @@ from .utils.logging_config import get_logger, setup_logging
+ from .utils.pytorch_utils import set_global_seed
+ from .utils.samplers import ResumableEpochSampler
+ from .utils.video_io import save_mp4
++from .utils.eval_visualization import imagination_execution_action_frames
+ from .utils.video_metrics import pil_frames_to_video_tensor, video_psnr, video_ssim
+ 
+ logger = get_logger(__name__)
+@@ -29,20 +30,58 @@ class Wan22Trainer:
      def __init__(self, model, train_dataset, val_dataset=None, *, cfg: DictConfig):
          self.model = model
          self.train_dataset = train_dataset
@@ -1121,6 +1129,18 @@ index 75e0f2e..a36b1b8 100644
 +        )
 +        if self.eval_fixed_index is not None and self.eval_fixed_index < 0:
 +            raise ValueError("eval_fixed_index must be non-negative when provided.")
++        eval_fixed_indices = cfg.get("eval_fixed_indices", None)
++        self.eval_fixed_indices = (
++            ()
++            if eval_fixed_indices is None
++            else tuple(int(value) for value in eval_fixed_indices)
++        )
++        if any(value < 0 for value in self.eval_fixed_indices):
++            raise ValueError("eval_fixed_indices must contain non-negative values.")
++        if len(set(self.eval_fixed_indices)) != len(self.eval_fixed_indices):
++            raise ValueError("eval_fixed_indices must not contain duplicates.")
++        if self.eval_fixed_index is not None and self.eval_fixed_indices:
++            raise ValueError("Set only one of eval_fixed_index and eval_fixed_indices.")
 +        self.eval_at_start = bool(cfg.get("eval_at_start", False))
 +        self.eval_video_fps = int(cfg.get("eval_video_fps", 8))
 +        if self.eval_video_fps <= 0:
@@ -1129,7 +1149,7 @@ index 75e0f2e..a36b1b8 100644
          self.gradient_accumulation_steps = int(cfg.gradient_accumulation_steps)
          self.max_grad_norm = float(cfg.max_grad_norm)
          self.seed = int(cfg.seed)
-@@ -62,10 +88,16 @@ class Wan22Trainer:
+@@ -62,10 +101,16 @@ class Wan22Trainer:
              step_scheduler_with_optimizer=False,
          )
          
@@ -1147,7 +1167,7 @@ index 75e0f2e..a36b1b8 100644
              self.accelerator.num_processes,
              self.accelerator.process_index,
              self.mixed_precision,
-@@ -81,11 +113,23 @@ class Wan22Trainer:
+@@ -81,11 +126,23 @@ class Wan22Trainer:
  
          # Freeze non-trainable modules before optimizer/deepspeed initialization.
          # This keeps DiT (+ optional proprio encoder) as trainable when ZeRO builds optimizer state.
@@ -1176,7 +1196,7 @@ index 75e0f2e..a36b1b8 100644
          self.optimizer = torch.optim.AdamW(
              trainable_params,
              lr=self.learning_rate,
-@@ -170,6 +214,12 @@ class Wan22Trainer:
+@@ -170,6 +227,12 @@ class Wan22Trainer:
              seed=self.seed,
              batch_size=self.batch_size,
              num_processes=self.accelerator.num_processes,
@@ -1189,7 +1209,7 @@ index 75e0f2e..a36b1b8 100644
          )
          return DataLoader(
              dataset,
-@@ -210,7 +260,7 @@ class Wan22Trainer:
+@@ -210,7 +273,7 @@ class Wan22Trainer:
  
          num_processes = max(int(self.accelerator.num_processes), 1)
          global_batch_size = max(self.batch_size * num_processes, 1)
@@ -1198,7 +1218,7 @@ index 75e0f2e..a36b1b8 100644
          opt_steps_per_epoch = max(
              ceil(micro_steps_per_epoch / self.gradient_accumulation_steps),
              1,
-@@ -275,12 +325,23 @@ class Wan22Trainer:
+@@ -275,12 +338,23 @@ class Wan22Trainer:
              raise FileNotFoundError(f"Resume checkpoint not found: {resume}")
          logger.info("Loading weight checkpoint only: %s", resume)
          self.accelerator.unwrap_model(self.model).load_checkpoint(str(resume_path), optimizer=None)
@@ -1225,7 +1245,7 @@ index 75e0f2e..a36b1b8 100644
          self._apply_dit_only_train_mode(model)
  
      @staticmethod
-@@ -294,6 +355,48 @@ class Wan22Trainer:
+@@ -294,6 +368,48 @@ class Wan22Trainer:
              proprio_encoder.train()
              proprio_encoder.requires_grad_(True)
  
@@ -1274,7 +1294,7 @@ index 75e0f2e..a36b1b8 100644
      @staticmethod
      def _to_batched_eval_sample(sample):
          video = sample["video"]
-@@ -363,7 +466,7 @@ class Wan22Trainer:
+@@ -363,7 +479,7 @@ class Wan22Trainer:
                      f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                  )
  
@@ -1283,7 +1303,7 @@ index 75e0f2e..a36b1b8 100644
              "video": video,
              "prompt": prompt,
              "action": action,
-@@ -372,6 +475,68 @@ class Wan22Trainer:
+@@ -372,9 +488,181 @@ class Wan22Trainer:
              "context_mask": context_mask,
              "action_horizon": action_horizon,
          }
@@ -1315,6 +1335,8 @@ index 75e0f2e..a36b1b8 100644
 +            "memory_mask_long",
 +            "memory_mask_mid",
 +            "memory_mask_short",
++            "camera_present_mask",
++            "camera_rectification_applied_mask",
 +        )
 +        scalar_fields = (
 +            "proprio_condition_mask",
@@ -1352,14 +1374,127 @@ index 75e0f2e..a36b1b8 100644
  
      @torch.no_grad()
      def evaluate(self):
-@@ -382,15 +547,33 @@ class Wan22Trainer:
++        if self.val_dataset is None:
++            return None
++        if not self.eval_fixed_indices:
++            return self._evaluate_single()
++
++        probe_results = [
++            self._evaluate_single(
++                eval_index_override=eval_index,
++                eval_probe_position=position,
++                artifact_suffix=f"_eval_{eval_index:06d}",
++            )
++            for position, eval_index in enumerate(self.eval_fixed_indices)
++        ]
++        mean_keys = (
++            "val_loss",
++            "psnr_rg",
++            "ssim_rg",
++            "psnr_rd",
++            "ssim_rd",
++            "psnr_dg",
++            "ssim_dg",
++            "memory_valid_ratio",
++        )
++        result = {
++            key: float(np.mean([float(record[key]) for record in probe_results]))
++            for key in mean_keys
++        }
++        for key in ("action_l1", "action_l2"):
++            values = [float(record[key]) for record in probe_results if key in record]
++            if values:
++                result[key] = float(np.mean(values))
++        slot_names = sorted(
++            {
++                slot
++                for record in probe_results
++                for slot in (record.get("action_l1_by_slot") or {})
++            },
++            key=int,
++        )
++        if slot_names:
++            result["action_l1_by_slot"] = {
++                slot: float(
++                    np.mean(
++                        [
++                            record["action_l1_by_slot"][slot]
++                            for record in probe_results
++                            if slot in (record.get("action_l1_by_slot") or {})
++                        ]
++                    )
++                )
++                for slot in slot_names
++            }
++        result.update(
++            {
++                "eval_suite": True,
++                "eval_indices": list(self.eval_fixed_indices),
++                "eval_probe_count": len(probe_results),
++                "probe_results": probe_results,
++                "video_path": probe_results[0]["video_path"],
++                "video_paths": [record["video_path"] for record in probe_results],
++                "action_artifacts": [
++                    record["action_artifact"]
++                    for record in probe_results
++                    if record.get("action_artifact")
++                ],
++                "imagination_video_paths": [
++                    record["imagination_video_path"]
++                    for record in probe_results
++                    if record.get("imagination_video_path")
++                ],
++                "execution_video_paths": [
++                    record["execution_video_path"]
++                    for record in probe_results
++                    if record.get("execution_video_path")
++                ],
++                "action_video_paths": [
++                    record["action_video_path"]
++                    for record in probe_results
++                    if record.get("action_video_path")
++                ],
++                "imagination_vs_execution_action_video_paths": [
++                    record["imagination_vs_execution_action_video_path"]
++                    for record in probe_results
++                    if record.get("imagination_vs_execution_action_video_path")
++                ],
++                "video_fps": int(self.eval_video_fps),
++                "conditioning": probe_results[0]["conditioning"],
++                "camera_rectification": probe_results[0]["camera_rectification"],
++            }
++        )
++        suite_path = os.path.join(
++            self.eval_dir,
++            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}_suite.json",
++        )
++        with open(suite_path, "w", encoding="utf-8") as handle:
++            json.dump(result, handle, ensure_ascii=True, indent=2, sort_keys=True)
++            handle.write("\n")
++        result["metrics_path"] = suite_path
++        return result
++
++    @torch.no_grad()
++    def _evaluate_single(
++        self,
++        *,
++        eval_index_override: int | None = None,
++        eval_probe_position: int | None = None,
++        artifact_suffix: str = "",
++    ):
+         if self.val_dataset is None:
+             return None
+ 
+@@ -382,15 +670,39 @@ class Wan22Trainer:
          was_dit_training = model.dit.training
          model.eval()
  
 -        # eval_index = (self.global_step + self.accelerator.process_index) % len(self.val_dataset)
 -        rng = torch.Generator(device="cpu").manual_seed(self.global_step + self.accelerator.process_index)
 -        eval_index = torch.randint(0, len(self.val_dataset), (1,), generator=rng).item()
-+        if self.eval_fixed_index is None:
++        if eval_index_override is not None:
++            eval_index = int(eval_index_override)
++        elif self.eval_fixed_index is None:
 +            rng = torch.Generator(device="cpu").manual_seed(
 +                self.global_step + self.accelerator.process_index
 +            )
@@ -1368,12 +1503,16 @@ index 75e0f2e..a36b1b8 100644
 +            ).item()
 +        else:
 +            eval_index = self.eval_fixed_index
-+            if eval_index >= len(self.val_dataset):
-+                raise IndexError(
-+                    f"eval_fixed_index={eval_index} is outside val dataset of size "
-+                    f"{len(self.val_dataset)}."
-+                )
++        if eval_index >= len(self.val_dataset):
++            raise IndexError(
++                f"evaluation index {eval_index} is outside val dataset of size "
++                f"{len(self.val_dataset)}."
++            )
          sample = self._to_batched_eval_sample(self.val_dataset[eval_index])
++        artifact_stem = (
++            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}"
++            f"{artifact_suffix}"
++        )
  
          # 1. training loss
 -        with self.accelerator.autocast():
@@ -1392,7 +1531,7 @@ index 75e0f2e..a36b1b8 100644
          
          prompt = sample["prompt"][0]
          video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
-@@ -409,7 +592,7 @@ class Wan22Trainer:
+@@ -409,7 +721,7 @@ class Wan22Trainer:
              "text_cfg_scale": 1.0,
              "action_cfg_scale": 1.0,
              "num_inference_steps": self.eval_num_inference_steps,
@@ -1401,7 +1540,7 @@ index 75e0f2e..a36b1b8 100644
              "tiled": False,
          }
          if sample["context"] is not None:
-@@ -418,6 +601,18 @@ class Wan22Trainer:
+@@ -418,6 +730,18 @@ class Wan22Trainer:
              infer_kwargs["context_mask"] = sample["context_mask"][0]
          else:
              infer_kwargs["prompt"] = prompt
@@ -1420,13 +1559,17 @@ index 75e0f2e..a36b1b8 100644
  
          pred = model.infer(
              **infer_kwargs,
-@@ -440,58 +635,137 @@ class Wan22Trainer:
+@@ -440,58 +764,181 @@ class Wan22Trainer:
  
          action_l1 = None
          action_l2 = None
 +        action_metric_space = None
 +        action_l1_by_slot = None
 +        action_artifact = None
++        imagination_path = None
++        execution_path = None
++        action_video_path = None
++        imagination_execution_action_path = None
 +        pred_metric = None
 +        gt_metric = None
 +        valid = None
@@ -1589,7 +1732,7 @@ index 75e0f2e..a36b1b8 100644
 +
 +            action_artifact = os.path.join(
 +                self.eval_dir,
-+                f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}_actions.npz",
++                f"{artifact_stem}_actions.npz",
 +            )
 +            np.savez_compressed(
 +                action_artifact,
@@ -1599,10 +1742,50 @@ index 75e0f2e..a36b1b8 100644
 +                gt_metric=gt_metric.numpy(),
 +                valid_metric=valid.numpy(),
 +            )
++
++        if pred_action is not None and action is not None:
++            valid_dimensions = (
++                None
++                if sample.get("action_dim_is_pad") is None
++                else ~sample["action_dim_is_pad"][0].detach().cpu()
++            )
++            (
++                imagination_frames,
++                execution_frames,
++                action_frames,
++                imagination_execution_action_demo,
++            ) = imagination_execution_action_frames(
++                pred_video_tensor,
++                gt_video_tensor,
++                pred_action,
++                action,
++                valid_dimensions=valid_dimensions,
++            )
++            imagination_path = os.path.join(
++                self.eval_dir, f"{artifact_stem}_imagination.mp4"
++            )
++            execution_path = os.path.join(
++                self.eval_dir, f"{artifact_stem}_execution.mp4"
++            )
++            action_video_path = os.path.join(
++                self.eval_dir, f"{artifact_stem}_action.mp4"
++            )
++            imagination_execution_action_path = os.path.join(
++                self.eval_dir,
++                f"{artifact_stem}_imagination_vs_execution_action.mp4",
++            )
++            save_mp4(imagination_frames, imagination_path, fps=self.eval_video_fps)
++            save_mp4(execution_frames, execution_path, fps=self.eval_video_fps)
++            save_mp4(action_frames, action_video_path, fps=self.eval_video_fps)
++            save_mp4(
++                imagination_execution_action_demo,
++                imagination_execution_action_path,
++                fps=self.eval_video_fps,
++            )
  
          # 4. VAE reconstruction metrics against GT video
          gt_video_batch = video0.unsqueeze(0).to(device=model.device, dtype=model.torch_dtype)
-@@ -510,20 +784,34 @@ class Wan22Trainer:
+@@ -510,20 +957,34 @@ class Wan22Trainer:
          psnr_rollout_vs_decode = video_psnr(pred=pred_video_tensor, target=vae_video_tensor)
          ssim_rollout_vs_decode = video_ssim(pred=pred_video_tensor, target=vae_video_tensor)
  
@@ -1636,14 +1819,15 @@ index 75e0f2e..a36b1b8 100644
  
          video_path = os.path.join(
              self.eval_dir,
-             f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}.mp4",
+-            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}.mp4",
++            f"{artifact_stem}.mp4",
          )
 -        save_mp4(stitched_frames, video_path, fps=8)
 +        save_mp4(stitched_frames, video_path, fps=self.eval_video_fps)
  
          local_metrics = torch.tensor(
              [
-@@ -562,6 +850,45 @@ class Wan22Trainer:
+@@ -562,6 +1023,67 @@ class Wan22Trainer:
              result["action_l2"] = float(action_l2_mean)
          if action_l1_mean is not None:
              result["action_l1"] = float(action_l1_mean)
@@ -1653,9 +1837,18 @@ index 75e0f2e..a36b1b8 100644
 +            result["action_l1_by_slot"] = action_l1_by_slot
 +        if action_artifact is not None:
 +            result["action_artifact"] = action_artifact
++        if imagination_path is not None:
++            result["imagination_video_path"] = imagination_path
++            result["execution_video_path"] = execution_path
++            result["action_video_path"] = action_video_path
++            result["imagination_vs_execution_action_video_path"] = (
++                imagination_execution_action_path
++            )
 +        result.update(
 +            {
 +                "eval_index": int(eval_index),
++                "eval_probe_position": eval_probe_position,
++                "eval_probe_count": len(self.eval_fixed_indices),
 +                "sample_index": int(sample.get("sample_index", torch.tensor([-1]))[0].item()),
 +                "window_start": int(sample.get("window_start", torch.tensor([-1]))[0].item()),
 +                "memory_valid_ratio": float(pred.get("memory_valid_ratio", 0.0)),
@@ -1676,11 +1869,24 @@ index 75e0f2e..a36b1b8 100644
 +                        getattr(model.video_expert, "action_conditioned", False)
 +                    ),
 +                },
++                "camera_rectification": {
++                    "applied_mask": (
++                        None
++                        if sample.get("camera_rectification_applied_mask") is None
++                        else sample["camera_rectification_applied_mask"][0]
++                        .detach()
++                        .cpu()
++                        .tolist()
++                    ),
++                    "config": getattr(
++                        self.val_dataset, "camera_rectification_metadata", None
++                    ),
++                },
 +            }
 +        )
 +        metrics_path = os.path.join(
 +            self.eval_dir,
-+            f"step_{self.global_step:06d}_rank_{self.accelerator.process_index:03d}.json",
++            f"{artifact_stem}.json",
 +        )
 +        with open(metrics_path, "w", encoding="utf-8") as handle:
 +            json.dump(result, handle, ensure_ascii=True, indent=2, sort_keys=True)
@@ -1689,7 +1895,7 @@ index 75e0f2e..a36b1b8 100644
          return result
  
      def _save_weights_checkpoint(self, step_tag: str):
-@@ -590,6 +917,9 @@ class Wan22Trainer:
+@@ -590,6 +1112,9 @@ class Wan22Trainer:
          self.accelerator.wait_for_everyone()
  
          state_path = os.path.join(self.state_dir, step_tag)
@@ -1699,7 +1905,7 @@ index 75e0f2e..a36b1b8 100644
          ensure_dir(state_path)
          self.accelerator.save_state(output_dir=state_path)
          if self.accelerator.is_main_process:
-@@ -652,9 +982,23 @@ class Wan22Trainer:
+@@ -652,9 +1177,23 @@ class Wan22Trainer:
              raise ValueError("`max_steps` must be set before entering the while-step training loop.")
  
          logger.info("Starting training with max_steps=%d.", self.max_steps)
@@ -1724,7 +1930,7 @@ index 75e0f2e..a36b1b8 100644
  
          while self.global_step < self.max_steps:
              try:
-@@ -690,7 +1034,7 @@ class Wan22Trainer:
+@@ -690,7 +1229,7 @@ class Wan22Trainer:
                          global_loss_metrics[key] = float(
                              self.accelerator.gather(metric_tensor).mean().item()
                          )
@@ -1733,7 +1939,7 @@ index 75e0f2e..a36b1b8 100644
                      global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
  
                      current_lr = float(self.optimizer.param_groups[0]["lr"])
-@@ -733,11 +1077,11 @@ class Wan22Trainer:
+@@ -733,11 +1272,11 @@ class Wan22Trainer:
                          metrics = self.evaluate()
                          self.accelerator.wait_for_everyone()
                          if metrics is not None and self.accelerator.is_main_process:
@@ -1748,7 +1954,7 @@ index 75e0f2e..a36b1b8 100644
                              )
                              if "action_l2" in metrics:
                                  description += " action_l2=%.4f" % metrics["action_l2"]
-@@ -759,6 +1103,7 @@ class Wan22Trainer:
+@@ -759,6 +1298,7 @@ class Wan22Trainer:
                                  eval_payload["eval/action_l1"] = float(metrics["action_l1"])
                              self._wandb_log(eval_payload)
  
@@ -1756,7 +1962,7 @@ index 75e0f2e..a36b1b8 100644
                      if self.save_every > 0 and self.global_step % self.save_every == 0:
                          ckpt_info = self.save_checkpoint()
                          if self.accelerator.is_main_process:
-@@ -770,7 +1115,8 @@ class Wan22Trainer:
+@@ -770,7 +1310,8 @@ class Wan22Trainer:
                              )
  
                      if self.global_step >= self.max_steps:
@@ -2789,10 +2995,10 @@ index 0000000..cc09bf8
 +    main()
 diff --git a/scripts/validate_training_case_data.py b/scripts/validate_training_case_data.py
 new file mode 100644
-index 0000000..faafff4
+index 0000000..fd07852
 --- /dev/null
 +++ b/scripts/validate_training_case_data.py
-@@ -0,0 +1,69 @@
+@@ -0,0 +1,76 @@
 +import json
 +from pathlib import Path
 +
@@ -2849,6 +3055,13 @@ index 0000000..faafff4
 +        "active_action_dimensions": int((~sample["action_dim_is_pad"]).sum()),
 +        "active_state_dimensions": int((~sample["proprio_dim_is_pad"]).sum()),
 +        "camera_present_mask": sample["camera_present_mask"].tolist(),
++        "camera_rectification_applied_mask": sample.get(
++            "camera_rectification_applied_mask",
++            torch.zeros(3, dtype=torch.bool),
++        ).tolist(),
++        "camera_rectification": getattr(
++            dataset, "camera_rectification_metadata", None
++        ),
 +        "video_min": float(sample["video"].min()),
 +        "video_max": float(sample["video"].max()),
 +    }
@@ -2985,10 +3198,10 @@ index 0000000..e4e3b74
 +    }
 diff --git a/src/fastwam/datasets/training_case_dataset.py b/src/fastwam/datasets/training_case_dataset.py
 new file mode 100644
-index 0000000..6662ba3
+index 0000000..2a5de55
 --- /dev/null
 +++ b/src/fastwam/datasets/training_case_dataset.py
-@@ -0,0 +1,884 @@
+@@ -0,0 +1,1174 @@
 +import hashlib
 +import io
 +import json
@@ -3007,6 +3220,7 @@ index 0000000..6662ba3
 +import numpy as np
 +import pyarrow.parquet as pq
 +import torch
++import torch.nn.functional as nn_F
 +import torchvision.transforms.functional as transforms_F
 +from PIL import Image
 +
@@ -3022,6 +3236,7 @@ index 0000000..6662ba3
 +
 +SCHEMA_VERSION = "fastwam-training-case-v1"
 +NORMALIZATION_SCHEMA_VERSION = "fastwam-canonical-normalization-v1"
++RECTIFICATION_SCHEMA_VERSION = "fastwam-camera-rectification-v1"
 +CANONICAL_DIM = 80
 +
 +
@@ -3029,6 +3244,252 @@ index 0000000..6662ba3
 +class _SampleRef:
 +    case_index: int
 +    start: int
++
++
++@dataclass(frozen=True)
++class _CameraRectificationProfile:
++    profile_id: str
++    model: str
++    calibration_status: str
++    image_size: tuple[int, int]
++    camera_matrix: tuple[tuple[float, float, float], ...]
++    distortion_coefficients: tuple[float, float, float, float]
++    virtual_horizontal_fov_degrees: float
++
++
++class CameraRectificationRegistry:
++    """Resolve and apply deterministic fisheye-to-pinhole camera projections."""
++
++    def __init__(self, path: str | os.PathLike[str]):
++        self.path = Path(path).expanduser().resolve(strict=True)
++        with self.path.open("r", encoding="utf-8") as handle:
++            payload = json.load(handle)
++        if payload.get("schema_version") != RECTIFICATION_SCHEMA_VERSION:
++            raise ValueError(
++                f"Unsupported camera rectification schema in {self.path}: "
++                f"{payload.get('schema_version')!r}"
++            )
++        raw_profiles = payload.get("profiles")
++        if not isinstance(raw_profiles, dict) or not raw_profiles:
++            raise ValueError(f"Camera rectification config contains no profiles: {self.path}")
++        self.profiles = {
++            str(profile_id): self._parse_profile(str(profile_id), raw_profile)
++            for profile_id, raw_profile in raw_profiles.items()
++        }
++        raw_bindings = payload.get("bindings") or {}
++        if not isinstance(raw_bindings, dict):
++            raise ValueError("Camera rectification bindings must be an object.")
++        self.source_key_bindings = self._parse_bindings(
++            raw_bindings.get("source_key") or {}, "source_key"
++        )
++        self.role_bindings = self._parse_bindings(raw_bindings.get("role") or {}, "role")
++        default_profile = payload.get("default_profile")
++        self.default_profile = None if default_profile is None else str(default_profile)
++        if self.default_profile is not None and self.default_profile not in self.profiles:
++            raise ValueError(
++                f"Unknown default camera rectification profile {self.default_profile!r}."
++            )
++        self.unmatched_policy = str(payload.get("unmatched_policy", "identity")).strip().lower()
++        if self.unmatched_policy not in {"identity", "error"}:
++            raise ValueError(
++                f"Unsupported camera rectification unmatched_policy={self.unmatched_policy!r}."
++            )
++        self._grid_cache: dict[tuple[str, int, int, int, int], torch.Tensor] = {}
++        self.metadata = {
++            "schema_version": RECTIFICATION_SCHEMA_VERSION,
++            "config_path": str(self.path),
++            "config_sha256": hashlib.sha256(self.path.read_bytes()).hexdigest(),
++            "profile_ids": sorted(self.profiles),
++            "calibration_status": {
++                profile_id: profile.calibration_status
++                for profile_id, profile in sorted(self.profiles.items())
++            },
++        }
++
++    def _parse_bindings(self, raw: Any, binding_type: str) -> dict[str, str]:
++        if not isinstance(raw, dict):
++            raise ValueError(f"Camera rectification {binding_type} bindings must be an object.")
++        bindings = {str(key): str(value) for key, value in raw.items()}
++        unknown = sorted(set(bindings.values()) - set(self.profiles))
++        if unknown:
++            raise ValueError(
++                f"Camera rectification {binding_type} bindings reference unknown profiles: {unknown}"
++            )
++        return bindings
++
++    @staticmethod
++    def _parse_profile(profile_id: str, raw: Any) -> _CameraRectificationProfile:
++        if not isinstance(raw, dict):
++            raise ValueError(f"Camera rectification profile {profile_id!r} must be an object.")
++        model = str(raw.get("model", "")).strip().lower()
++        if model != "opencv_fisheye":
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} uses unsupported model {model!r}."
++            )
++        image_size = tuple(int(value) for value in raw.get("image_size", ()))
++        if len(image_size) != 2 or any(value <= 1 for value in image_size):
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} image_size must be [height,width]."
++            )
++        matrix = np.asarray(raw.get("camera_matrix"), dtype=np.float64)
++        if matrix.shape != (3, 3) or not np.isfinite(matrix).all():
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} camera_matrix must be finite 3x3."
++            )
++        if matrix[0, 0] <= 0 or matrix[1, 1] <= 0:
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} focal lengths must be positive."
++            )
++        if not np.allclose(matrix[2], np.asarray([0.0, 0.0, 1.0])):
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} camera_matrix bottom row is invalid."
++            )
++        if not np.isclose(matrix[0, 1], 0.0) or not np.isclose(matrix[1, 0], 0.0):
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} skew is not supported."
++            )
++        distortion = tuple(float(value) for value in raw.get("distortion_coefficients", ()))
++        if len(distortion) != 4 or not np.isfinite(distortion).all():
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} distortion_coefficients must have 4 finite values."
++            )
++        virtual = raw.get("virtual_camera") or {}
++        horizontal_fov = float(virtual.get("horizontal_fov_degrees", 0.0))
++        if not 1.0 < horizontal_fov < 179.0:
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} virtual horizontal FOV must be in (1,179)."
++            )
++        calibration_status = str(raw.get("calibration_status", "unspecified")).strip()
++        if not calibration_status:
++            raise ValueError(
++                f"Camera rectification profile {profile_id!r} calibration_status is required."
++            )
++        return _CameraRectificationProfile(
++            profile_id=profile_id,
++            model=model,
++            calibration_status=calibration_status,
++            image_size=(image_size[0], image_size[1]),
++            camera_matrix=tuple(tuple(float(value) for value in row) for row in matrix),
++            distortion_coefficients=distortion,
++            virtual_horizontal_fov_degrees=horizontal_fov,
++        )
++
++    def resolve(self, camera: dict[str, Any]) -> _CameraRectificationProfile | None:
++        profile_id = self.source_key_bindings.get(str(camera.get("source_key", "")))
++        if profile_id is None:
++            profile_id = self.role_bindings.get(str(camera.get("role", "")))
++        if profile_id is None:
++            profile_id = self.default_profile
++        if profile_id is None:
++            if self.unmatched_policy == "error":
++                raise ValueError(
++                    "No camera rectification profile matches "
++                    f"source_key={camera.get('source_key')!r}, role={camera.get('role')!r}."
++                )
++            return None
++        return self.profiles[profile_id]
++
++    def _build_grid(
++        self,
++        profile: _CameraRectificationProfile,
++        *,
++        source_size: tuple[int, int],
++        output_size: tuple[int, int],
++    ) -> torch.Tensor:
++        source_height, source_width = source_size
++        if source_size != profile.image_size:
++            raise ValueError(
++                f"Camera rectification profile {profile.profile_id!r} expects source "
++                f"{profile.image_size}, got {source_size}."
++            )
++        output_height, output_width = output_size
++        key = (
++            profile.profile_id,
++            source_height,
++            source_width,
++            output_height,
++            output_width,
++        )
++        cached = self._grid_cache.get(key)
++        if cached is not None:
++            return cached
++
++        matrix = profile.camera_matrix
++        source_fx = matrix[0][0]
++        source_fy = matrix[1][1]
++        source_cx = matrix[0][2]
++        source_cy = matrix[1][2]
++        virtual_fx = (output_width * 0.5) / np.tan(
++            np.deg2rad(profile.virtual_horizontal_fov_degrees) * 0.5
++        )
++        virtual_fy = virtual_fx
++        virtual_cx = (output_width - 1) * 0.5
++        virtual_cy = (output_height - 1) * 0.5
++
++        yy, xx = torch.meshgrid(
++            torch.arange(output_height, dtype=torch.float32),
++            torch.arange(output_width, dtype=torch.float32),
++            indexing="ij",
++        )
++        x = (xx - virtual_cx) / float(virtual_fx)
++        y = (yy - virtual_cy) / float(virtual_fy)
++        radius = torch.sqrt(x.square() + y.square())
++        theta = torch.atan(radius)
++        theta2 = theta.square()
++        k1, k2, k3, k4 = profile.distortion_coefficients
++        theta_distorted = theta * (
++            1.0
++            + k1 * theta2
++            + k2 * theta2.square()
++            + k3 * theta2.pow(3)
++            + k4 * theta2.pow(4)
++        )
++        scale = torch.where(
++            radius > 1.0e-8,
++            theta_distorted / radius.clamp_min(1.0e-8),
++            torch.ones_like(radius),
++        )
++        source_x = float(source_fx) * x * scale + float(source_cx)
++        source_y = float(source_fy) * y * scale + float(source_cy)
++        grid_x = source_x.mul(2.0 / float(source_width - 1)).sub(1.0)
++        grid_y = source_y.mul(2.0 / float(source_height - 1)).sub(1.0)
++        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0).contiguous()
++        self._grid_cache[key] = grid
++        return grid
++
++    def rectify(
++        self,
++        frames: torch.Tensor,
++        *,
++        camera: dict[str, Any],
++        output_size: tuple[int, int],
++    ) -> tuple[torch.Tensor, bool]:
++        if frames.ndim != 4 or frames.shape[1] != 3:
++            raise ValueError(f"Camera frames must be [T,3,H,W], got {tuple(frames.shape)}")
++        profile = self.resolve(camera)
++        if profile is None:
++            return (
++                transforms_F.resize(
++                    frames,
++                    size=list(output_size),
++                    interpolation=transforms_F.InterpolationMode.BILINEAR,
++                    antialias=True,
++                ),
++                False,
++            )
++        grid = self._build_grid(
++            profile,
++            source_size=(int(frames.shape[2]), int(frames.shape[3])),
++            output_size=output_size,
++        ).to(device=frames.device, dtype=frames.dtype)
++        rectified = nn_F.grid_sample(
++            frames,
++            grid.expand(frames.shape[0], -1, -1, -1),
++            mode="bilinear",
++            padding_mode="zeros",
++            align_corners=True,
++        )
++        return rectified, True
 +
 +
 +def _as_string_set(value: str | Sequence[str] | None) -> set[str] | None:
@@ -3300,6 +3761,7 @@ index 0000000..6662ba3
 +        video_size: Sequence[int] = (384, 320),
 +        camera_roles: Sequence[str] = ("global_primary", "left_wrist", "right_wrist"),
 +        missing_camera_policy: str = "zero",
++        camera_rectification_config: str | None = None,
 +        normalization_clip: float | None = 10.0,
 +        episode_cache_size: int = 2,
 +        tar_member_cache_dir: str | None = None,
@@ -3328,6 +3790,19 @@ index 0000000..6662ba3
 +        self.video_size = tuple(int(value) for value in video_size)
 +        self.camera_roles = tuple(str(value) for value in camera_roles)
 +        self.missing_camera_policy = str(missing_camera_policy)
++        rectification_path = None
++        if camera_rectification_config is not None:
++            rectification_path = Path(camera_rectification_config).expanduser()
++            if not rectification_path.is_absolute():
++                rectification_path = self.data_root / rectification_path
++        self.camera_rectification = (
++            None
++            if rectification_path is None
++            else CameraRectificationRegistry(rectification_path)
++        )
++        self.camera_rectification_metadata = (
++            None if self.camera_rectification is None else self.camera_rectification.metadata
++        )
 +        self.normalization_clip = None if normalization_clip is None else float(normalization_clip)
 +        self.episode_cache_size = int(episode_cache_size)
 +        self.tar_member_cache_dir = (
@@ -3394,6 +3869,14 @@ index 0000000..6662ba3
 +        self.samples = samples
 +        self.sample_group_ids = tuple(
 +            str(self.cases[ref.case_index]["dataset"]) for ref in self.samples
++        )
++        self.sample_episode_ids = tuple(
++            str(
++                self.cases[ref.case_index].get("split_group_id")
++                or self.cases[ref.case_index].get("source_episode_id")
++                or self.cases[ref.case_index]["case_id"]
++            )
++            for ref in self.samples
 +        )
 +
 +        logger.info(
@@ -3629,7 +4112,9 @@ index 0000000..6662ba3
 +            path = self.data_root / path
 +        return str(path)
 +
-+    def _compose_video(self, case: dict[str, Any], source_indices: Sequence[int]) -> tuple[torch.Tensor, torch.Tensor]:
++    def _compose_video(
++        self, case: dict[str, Any], source_indices: Sequence[int]
++    ) -> tuple[torch.Tensor, torch.Tensor, torch.Tensor]:
 +        cameras = self._camera_lookup(case)
 +        global_camera = cameras.get("global_primary") or cameras.get("global_secondary") or cameras.get("auxiliary")
 +        if global_camera is None:
@@ -3649,12 +4134,17 @@ index 0000000..6662ba3
 +                    tar_member_cache_dir=self.tar_member_cache_dir,
 +                )
 +
-+        def prepare(camera: dict[str, Any] | None, size: tuple[int, int]) -> torch.Tensor:
++        def prepare(
++            camera: dict[str, Any] | None, size: tuple[int, int]
++        ) -> tuple[torch.Tensor, bool]:
 +            if camera is None:
 +                if self.missing_camera_policy == "repeat_global":
 +                    camera = global_camera
 +                else:
-+                    return torch.zeros((len(source_indices), 3, *size), dtype=torch.float32)
++                    return (
++                        torch.zeros((len(source_indices), 3, *size), dtype=torch.float32),
++                        False,
++                    )
 +            uri = self._resolve_video_uri(str(camera["source_uri"]))
 +            frames = decoded.get(uri)
 +            if frames is None:
@@ -3665,16 +4155,25 @@ index 0000000..6662ba3
 +                )
 +                decoded[uri] = frames
 +            tensor = frames.permute(0, 3, 1, 2).to(dtype=torch.float32).div_(255.0)
-+            return transforms_F.resize(
-+                tensor,
-+                size=list(size),
-+                interpolation=transforms_F.InterpolationMode.BILINEAR,
-+                antialias=True,
++            if self.camera_rectification is not None:
++                return self.camera_rectification.rectify(
++                    tensor,
++                    camera=camera,
++                    output_size=size,
++                )
++            return (
++                transforms_F.resize(
++                    tensor,
++                    size=list(size),
++                    interpolation=transforms_F.InterpolationMode.BILINEAR,
++                    antialias=True,
++                ),
++                False,
 +            )
 +
-+        top = prepare(selected[0], (256, 320))
-+        left = prepare(selected[1], (128, 160))
-+        right = prepare(selected[2], (128, 160))
++        top, top_rectified = prepare(selected[0], (256, 320))
++        left, left_rectified = prepare(selected[1], (128, 160))
++        right, right_rectified = prepare(selected[2], (128, 160))
 +        composite = torch.cat([top, torch.cat([left, right], dim=-1)], dim=-2)
 +        if tuple(composite.shape[-2:]) != self.video_size:
 +            composite = transforms_F.resize(
@@ -3684,7 +4183,10 @@ index 0000000..6662ba3
 +                antialias=True,
 +            )
 +        video = composite.mul(2.0).sub(1.0).permute(1, 0, 2, 3).contiguous()
-+        return video, present
++        rectified = torch.tensor(
++            [top_rectified, left_rectified, right_rectified], dtype=torch.bool
++        )
++        return video, present, rectified
 +
 +    def _get_cached_text_context(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
 +        hashed = hashlib.sha256(prompt.encode("utf-8")).hexdigest()
@@ -3758,7 +4260,7 @@ index 0000000..6662ba3
 +        additional_source_indices = [
 +            int(value) for value in (additional_source_indices or ())
 +        ]
-+        combined_video, camera_present = self._compose_video(
++        combined_video, camera_present, camera_rectified = self._compose_video(
 +            case, source_indices + additional_source_indices
 +        )
 +        video = combined_video[:, : len(source_indices)]
@@ -3801,6 +4303,7 @@ index 0000000..6662ba3
 +                dtype=torch.float32,
 +            ),
 +            "camera_present_mask": camera_present,
++            "camera_rectification_applied_mask": camera_rectified,
 +            "sample_index": torch.tensor(index, dtype=torch.int64),
 +            "window_start": torch.tensor(start, dtype=torch.int64),
 +        }
@@ -5108,6 +5611,256 @@ index 0000000..169819f
 +        if optimizer is not None and "optimizer" in payload:
 +            optimizer.load_state_dict(payload["optimizer"])
 +        return payload
+diff --git a/src/fastwam/utils/eval_visualization.py b/src/fastwam/utils/eval_visualization.py
+new file mode 100644
+index 0000000..0a96dcf
+--- /dev/null
++++ b/src/fastwam/utils/eval_visualization.py
+@@ -0,0 +1,196 @@
++from __future__ import annotations
++
++from typing import Sequence
++
++import numpy as np
++import torch
++from PIL import Image, ImageDraw
++
++
++_ACTION_SLOT_LABELS = {
++    13: "R GRIP",
++    21: "R J1",
++    22: "R J2",
++    23: "R J3",
++    24: "R J4",
++    25: "R J5",
++    26: "R J6",
++    27: "R J7",
++}
++
++
++def _as_td(value: torch.Tensor, name: str) -> torch.Tensor:
++    value = value.detach().to(device="cpu", dtype=torch.float32)
++    if value.ndim == 3 and value.shape[0] == 1:
++        value = value[0]
++    if value.ndim != 2:
++        raise ValueError(f"{name} must be [T,D] or [1,T,D], got {tuple(value.shape)}")
++    return value
++
++
++def labeled_video_frames(
++    video: torch.Tensor, label: str, *, label_height: int = 32
++) -> list[Image.Image]:
++    if video.ndim != 4 or video.shape[0] != 3:
++        raise ValueError(f"video must be [3,T,H,W], got {tuple(video.shape)}")
++    if label_height <= 0:
++        raise ValueError("label_height must be positive")
++    video = video.detach().to(device="cpu", dtype=torch.float32).clamp(0.0, 1.0)
++    frames: list[Image.Image] = []
++    for time_index in range(video.shape[1]):
++        array = (
++            video[:, time_index].permute(1, 2, 0).numpy() * 255.0
++        ).round().astype(np.uint8)
++        image = Image.fromarray(array, mode="RGB")
++        labeled = Image.new(
++            "RGB", (image.width, image.height + label_height), color=(16, 16, 16)
++        )
++        labeled.paste(image, (0, label_height))
++        ImageDraw.Draw(labeled).text((8, 9), label, fill=(255, 255, 255))
++        frames.append(labeled)
++    return frames
++
++
++def action_trace_frames(
++    pred_action: torch.Tensor,
++    gt_action: torch.Tensor,
++    *,
++    valid_dimensions: torch.Tensor | Sequence[bool] | None,
++    frame_count: int,
++    width: int,
++    height: int = 224,
++) -> list[Image.Image]:
++    pred = _as_td(pred_action, "pred_action")
++    gt = _as_td(gt_action, "gt_action")
++    if pred.shape != gt.shape:
++        raise ValueError(
++            f"pred_action and gt_action must have the same shape, got {tuple(pred.shape)} and {tuple(gt.shape)}"
++        )
++    if frame_count <= 0 or width < 320 or height < 120:
++        raise ValueError("Action visualization dimensions are too small.")
++    if valid_dimensions is None:
++        valid = torch.ones(pred.shape[1], dtype=torch.bool)
++    else:
++        valid = torch.as_tensor(valid_dimensions, dtype=torch.bool).flatten()
++        if valid.shape[0] != pred.shape[1]:
++            raise ValueError(
++                f"valid_dimensions must be [D], got {tuple(valid.shape)} for action {tuple(pred.shape)}"
++            )
++    slots = torch.where(valid)[0].tolist()
++    margin_left = 58
++    margin_right = 12
++    header_height = 36
++    plot_width = width - margin_left - margin_right
++    row_height = max((height - header_height - 8) // max(len(slots), 1), 1)
++    time_count = pred.shape[0]
++
++    def x_position(index: int) -> int:
++        if time_count <= 1:
++            return margin_left
++        return margin_left + round(index * (plot_width - 1) / (time_count - 1))
++
++    scales: dict[int, tuple[float, float]] = {}
++    for slot in slots:
++        values = torch.cat([pred[:, slot], gt[:, slot]])
++        low = float(values.min().item())
++        high = float(values.max().item())
++        if high - low < 1.0e-5:
++            center = 0.5 * (low + high)
++            low, high = center - 0.5, center + 0.5
++        padding = 0.08 * (high - low)
++        scales[slot] = (low - padding, high + padding)
++
++    def y_position(slot: int, row: int, value: float) -> int:
++        low, high = scales[slot]
++        top = header_height + row * row_height + 2
++        bottom = header_height + (row + 1) * row_height - 3
++        fraction = (value - low) / (high - low)
++        return bottom - round(float(np.clip(fraction, 0.0, 1.0)) * max(bottom - top, 1))
++
++    frames: list[Image.Image] = []
++    for frame_index in range(frame_count):
++        image = Image.new("RGB", (width, height), color=(16, 16, 16))
++        draw = ImageDraw.Draw(image)
++        draw.text((8, 8), "ACTION (normalized)", fill=(255, 255, 255))
++        draw.line((158, 15, 181, 15), fill=(255, 166, 72), width=3)
++        draw.text((186, 8), "GT", fill=(255, 166, 72))
++        draw.line((226, 15, 249, 15), fill=(70, 210, 255), width=3)
++        draw.text((254, 8), "PRED", fill=(70, 210, 255))
++        if not slots:
++            draw.text((8, 54), "NO ACTION-SUPERVISED DIMENSIONS", fill=(180, 180, 180))
++            frames.append(image)
++            continue
++        for row, slot in enumerate(slots):
++            top = header_height + row * row_height
++            bottom = header_height + (row + 1) * row_height - 1
++            draw.text(
++                (6, top + max((row_height - 11) // 2, 0)),
++                _ACTION_SLOT_LABELS.get(slot, f"S{slot}"),
++                fill=(210, 210, 210),
++            )
++            draw.line((margin_left, bottom, width - margin_right, bottom), fill=(48, 48, 48))
++            gt_points = [
++                (x_position(index), y_position(slot, row, float(gt[index, slot].item())))
++                for index in range(time_count)
++            ]
++            pred_points = [
++                (x_position(index), y_position(slot, row, float(pred[index, slot].item())))
++                for index in range(time_count)
++            ]
++            if len(gt_points) > 1:
++                draw.line(gt_points, fill=(255, 166, 72), width=2)
++                draw.line(pred_points, fill=(70, 210, 255), width=2)
++            else:
++                draw.point(gt_points[0], fill=(255, 166, 72))
++                draw.point(pred_points[0], fill=(70, 210, 255))
++        action_index = (
++            0
++            if frame_count <= 1
++            else round(frame_index * (time_count - 1) / (frame_count - 1))
++        )
++        cursor_x = x_position(action_index)
++        draw.line(
++            (cursor_x, header_height, cursor_x, height - 2),
++            fill=(255, 255, 255),
++            width=1,
++        )
++        frames.append(image)
++    return frames
++
++
++def imagination_execution_action_frames(
++    pred_video: torch.Tensor,
++    gt_video: torch.Tensor,
++    pred_action: torch.Tensor,
++    gt_action: torch.Tensor,
++    *,
++    valid_dimensions: torch.Tensor | Sequence[bool] | None,
++) -> tuple[list[Image.Image], list[Image.Image], list[Image.Image], list[Image.Image]]:
++    imagination = labeled_video_frames(pred_video, "IMAGINATION")
++    execution = labeled_video_frames(gt_video, "GROUND TRUTH EXECUTION")
++    if len(imagination) != len(execution):
++        raise ValueError("Predicted and ground-truth videos have different frame counts.")
++    action = action_trace_frames(
++        pred_action,
++        gt_action,
++        valid_dimensions=valid_dimensions,
++        frame_count=len(imagination),
++        width=imagination[0].width + execution[0].width,
++    )
++    combined: list[Image.Image] = []
++    for imagination_frame, execution_frame, action_frame in zip(
++        imagination, execution, action
++    ):
++        frame = Image.new(
++            "RGB",
++            (
++                imagination_frame.width + execution_frame.width,
++                imagination_frame.height + action_frame.height,
++            ),
++            color=(16, 16, 16),
++        )
++        frame.paste(imagination_frame, (0, 0))
++        frame.paste(execution_frame, (imagination_frame.width, 0))
++        frame.paste(action_frame, (0, imagination_frame.height))
++        combined.append(frame)
++    return imagination, execution, action, combined
+diff --git a/tests/test_eval_visualization.py b/tests/test_eval_visualization.py
+new file mode 100644
+index 0000000..4bf546e
+--- /dev/null
++++ b/tests/test_eval_visualization.py
+@@ -0,0 +1,42 @@
++import torch
++
++from fastwam.utils.eval_visualization import (
++    action_trace_frames,
++    imagination_execution_action_frames,
++)
++
++
++def test_imagination_execution_action_artifacts_have_stable_dimensions():
++    pred_video = torch.zeros((3, 21, 384, 320), dtype=torch.float32)
++    gt_video = torch.ones_like(pred_video)
++    pred_action = torch.linspace(-1.0, 1.0, 80).view(80, 1).repeat(1, 80)
++    gt_action = pred_action * 0.5
++    valid = torch.zeros(80, dtype=torch.bool)
++    valid[[13, 21, 22, 23, 24, 25, 26, 27]] = True
++
++    imagination, execution, action, combined = imagination_execution_action_frames(
++        pred_video,
++        gt_video,
++        pred_action,
++        gt_action,
++        valid_dimensions=valid,
++    )
++
++    assert len(imagination) == len(execution) == len(action) == len(combined) == 21
++    assert imagination[0].size == (320, 416)
++    assert execution[0].size == (320, 416)
++    assert action[0].size == (640, 224)
++    assert combined[0].size == (640, 640)
++
++
++def test_action_trace_supports_video_only_samples():
++    frames = action_trace_frames(
++        torch.zeros((80, 80)),
++        torch.zeros((80, 80)),
++        valid_dimensions=torch.zeros(80, dtype=torch.bool),
++        frame_count=21,
++        width=640,
++    )
++
++    assert len(frames) == 21
++    assert frames[0].size == (640, 224)
 diff --git a/tests/test_masked_losses.py b/tests/test_masked_losses.py
 new file mode 100644
 index 0000000..eb5da53
@@ -5557,18 +6310,21 @@ index 0000000..8d00b57
 +    assert list(sampler) == full_epoch[4:]
 diff --git a/tests/test_training_case_io.py b/tests/test_training_case_io.py
 new file mode 100644
-index 0000000..bb0be20
+index 0000000..d2601d7
 --- /dev/null
 +++ b/tests/test_training_case_io.py
-@@ -0,0 +1,63 @@
+@@ -0,0 +1,144 @@
 +import io
++import json
 +from pathlib import Path
 +import tarfile
 +from types import SimpleNamespace
 +
++import pytest
 +import torch
 +
 +from fastwam.datasets.training_case_dataset import (
++    CameraRectificationRegistry,
 +    TrainingCaseDataset,
 +    materialize_tar_video_member,
 +)
@@ -5624,3 +6380,81 @@ index 0000000..bb0be20
 +    assert torch.all(denormalized[:, 13] == 2.0)
 +    assert torch.all(denormalized[:, 21] == 2.0)
 +    assert torch.count_nonzero(denormalized[:, ~valid_tensor]) == 0
++
++
++def _write_rectification_config(path: Path):
++    path.write_text(
++        json.dumps(
++            {
++                "schema_version": "fastwam-camera-rectification-v1",
++                "profiles": {
++                    "test": {
++                        "model": "opencv_fisheye",
++                        "calibration_status": "synthetic_test",
++                        "image_size": [9, 9],
++                        "camera_matrix": [
++                            [9.0 / torch.pi, 0.0, 4.0],
++                            [0.0, 9.0 / torch.pi, 4.0],
++                            [0.0, 0.0, 1.0],
++                        ],
++                        "distortion_coefficients": [0.0, 0.0, 0.0, 0.0],
++                        "virtual_camera": {"horizontal_fov_degrees": 100.0},
++                    }
++                },
++                "bindings": {
++                    "source_key": {"camera.test": "test"},
++                    "role": {},
++                },
++                "unmatched_policy": "identity",
++            }
++        ),
++        encoding="utf-8",
++    )
++
++
++def test_camera_rectification_preserves_center_and_resizes(tmp_path):
++    config = tmp_path / "rectification.json"
++    _write_rectification_config(config)
++    registry = CameraRectificationRegistry(config)
++    frames = torch.zeros((2, 3, 9, 9), dtype=torch.float32)
++    frames[:, 0, 4, 4] = 1.0
++
++    rectified, applied = registry.rectify(
++        frames,
++        camera={"source_key": "camera.test", "role": "global_primary"},
++        output_size=(5, 7),
++    )
++
++    assert applied
++    assert tuple(rectified.shape) == (2, 3, 5, 7)
++    torch.testing.assert_close(rectified[:, 0, 2, 3], torch.ones(2))
++    assert registry.metadata["calibration_status"] == {"test": "synthetic_test"}
++
++
++def test_camera_rectification_leaves_unbound_camera_as_identity_resize(tmp_path):
++    config = tmp_path / "rectification.json"
++    _write_rectification_config(config)
++    registry = CameraRectificationRegistry(config)
++    frames = torch.rand((1, 3, 9, 9), dtype=torch.float32)
++
++    resized, applied = registry.rectify(
++        frames,
++        camera={"source_key": "camera.other", "role": "auxiliary"},
++        output_size=(5, 7),
++    )
++
++    assert not applied
++    assert tuple(resized.shape) == (1, 3, 5, 7)
++
++
++def test_camera_rectification_rejects_source_size_mismatch(tmp_path):
++    config = tmp_path / "rectification.json"
++    _write_rectification_config(config)
++    registry = CameraRectificationRegistry(config)
++
++    with torch.no_grad(), pytest.raises(ValueError, match="expects source"):
++        registry.rectify(
++            torch.zeros((1, 3, 8, 9), dtype=torch.float32),
++            camera={"source_key": "camera.test", "role": "global_primary"},
++            output_size=(5, 7),
++        )

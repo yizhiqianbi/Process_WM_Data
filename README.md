@@ -36,6 +36,8 @@ python3 scripts/tune_models.py dry-run \
 完整流程见 [三模型统一微调](docs/training/THREE_MODEL_TUNING.md)。
 天机自采数据的 FastWAM 单轨迹想象 vs GT 实验见
 [FastWAM 天机单轨迹过拟合](docs/training/FASTWAM_TIANJI_OVERFIT.md)。
+44 条自采轨迹的去鱼眼联合训练与 imagination/action demo 见
+[FastWAM 天机全数据去鱼眼过拟合](docs/training/FASTWAM_TIANJI_DATASET_OVERFIT.md)。
 
 ## 安装
 
@@ -142,6 +144,7 @@ python3 scripts/install_dreamzero_profile.py \
 6. [当前验收状态](docs/reference/VALIDATION_STATUS.md)
 7. [三模型统一微调](docs/training/THREE_MODEL_TUNING.md)
 8. [FastWAM 天机单窗口过拟合](docs/training/FASTWAM_TIANJI_OVERFIT.md)
+9. [FastWAM 天机全数据去鱼眼过拟合](docs/training/FASTWAM_TIANJI_DATASET_OVERFIT.md)
 
 ## 仓库结构
 
