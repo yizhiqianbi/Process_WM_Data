@@ -562,10 +562,10 @@ CUDA_VISIBLE_DEVICES=0 $PY scripts/train.py task=stage2_agibot_memory_smoke
 数据侧：
 
 ```text
-Preprocess_FastWAM/fastwam_preprocess/
-Preprocess_FastWAM/scripts/run_pipeline.py
-Preprocess_FastWAM/scripts/validate_fastwam_training_cases.py
-Preprocess_FastWAM/work/stage_pipeline/<dataset>/
+Process_WM_Data/fastwam_preprocess/
+Process_WM_Data/scripts/run_pipeline.py
+Process_WM_Data/scripts/validate_fastwam_training_cases.py
+Process_WM_Data/work/stage_pipeline/<dataset>/
 ```
 
 训练侧：

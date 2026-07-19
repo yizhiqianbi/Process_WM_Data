@@ -2,7 +2,7 @@
 
 [文档索引](../README.md)
 
-本文档描述 `Preprocess_FastWAM` 当前可执行的第二版数据清洗设计。它参考：
+本文档描述 `Process_WM_Data` 当前可执行的第二版数据清洗设计。它参考：
 
 `$FASTWAM_DATA_ROOT/World+Action+Model+-+Data+Statistics_(1)(1).pdf`
 

@@ -37,14 +37,14 @@ DATA_ROOT/
 
 1. CLI `--data-root`.
 2. Environment variable `FASTWAM_DATA_ROOT`.
-3. Parent directory of `Preprocess_FastWAM`.
+3. Parent directory of `Process_WM_Data`.
 
 ## 2. Minimal environment
 
 Only two packages are required for downloading:
 
 ```bash
-cd Preprocess_FastWAM
+cd Process_WM_Data
 python3 -m pip install -r requirements-download.txt
 ```
 
@@ -263,7 +263,7 @@ The code is independent of the original server layout. Export it without Git his
 generated work, downloaded data, model weights, or tokens:
 
 ```bash
-scripts/export_code.sh /tmp/Preprocess_FastWAM.tar.gz
+scripts/export_code.sh /tmp/Process_WM_Data.tar.gz
 ```
 
 On the destination server, install `requirements-download.txt`, set `HF_TOKEN_FILE` and
