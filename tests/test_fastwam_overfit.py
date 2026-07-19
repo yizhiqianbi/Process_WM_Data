@@ -44,6 +44,18 @@ def test_overfit_summary_requires_step_zero_baseline():
         summarize_overfit([_record(50, 12.0, 0.30, 0.4)])
 
 
+def test_overfit_summary_accepts_external_baseline_for_continuation():
+    baseline = _record(0, 8.0, 0.20, 1.0)
+    continuation = _record(350, 12.0, 0.30, 0.4)
+    continuation["run_step"] = 50
+
+    report = summarize_overfit([continuation], baseline_record=baseline)
+
+    assert report["status"] == "passed"
+    assert report["selected"]["record"]["step"] == 350
+    assert report["selected"]["record"]["run_step"] == 50
+
+
 def test_load_eval_records_filters_rank_and_orders_steps(tmp_path):
     eval_dir = tmp_path / "eval"
     eval_dir.mkdir()

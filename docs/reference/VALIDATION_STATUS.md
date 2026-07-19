@@ -29,10 +29,11 @@ from this repository.
 | FastWAM self-data preprocessing | Passed | 44 A-tier episodes; 486 windows: 381 action and 105 interval-downgraded video-only; 127 deduplicated cases |
 | Unified three-model launcher | Passed | Structured argv, external SHA, logs, receipts, checkpoint discovery and explicit resume |
 | FastWAM self-data optimizer/resume | Passed | Real step 1, full-state resume to step 2, action/video/memory losses finite |
+| FastWAM Tianji fixed-window overfit | Passed | Step 300 first passes; selected cumulative step 900: 26.8693 dB, 0.9313 SSIM, action L1 0.01941; memory fully valid |
 | Old LingBot-VA optimizer/resume | Passed on one complete three-view latent segment | Real step 1, optimizer/scheduler resume to step 2, latent/action losses finite |
 | DreamZero optimizer/resume | Passed | Real LoRA step 1, Trainer resume to step 2, dynamics/action losses finite |
-| Repository tests | Passed | 50 tests, including target readiness and launcher checkpoint semantics |
-| FastWAM integration tests | Passed | 15 tests in the connected FastWAM checkout |
+| Repository tests | Passed | 56 tests, including fixed-sample reports, continuation baselines and loss overrides |
+| FastWAM integration tests | Passed | 21 tests in the connected FastWAM checkout, including padded-action inference |
 | AgiBot-specific optimizer/checkpoint smoke | Pending dataset-specific run | The current optimizer proof uses `take_wrong_item_right_arm`, not AgiBot |
 | Full nine-domain production stats | Pending full manifests | Validation stats currently cover only locally materialized train/A/joint domains |
 

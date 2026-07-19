@@ -4,6 +4,12 @@ This directory carries the code-only FastWAM integration required by the canonic
 `TrainingCaseV1`, 8/2/1 visual memory, fixed-sample evaluation, and Tianji overfit workflow.
 It contains no model weights, datasets, caches, or credentials.
 
+Current patch SHA256:
+
+```text
+b3692798b83bbd0f5ba5309e65f84e30a9b4a8d37e8b77a568c486c14cbbf90f
+```
+
 The patch is pinned to upstream FastWAM commit:
 
 ```text
@@ -28,6 +34,9 @@ Then install the FastWAM environment and run its CPU contract tests:
 cd /path/to/FastWAM
 python -m pytest -q
 ```
+
+The current clean-checkout result is 21 passed tests. This includes the inference contract that
+keeps canonical padded action dimensions zero throughout flow-matching denoising.
 
 `scripts/export_fastwam_integration_patch.sh` regenerates the patch from the maintained local
 checkout. It intentionally exports only canonical data, memory model, trainer, scheduler, and

@@ -141,6 +141,7 @@ python3 scripts/install_dreamzero_profile.py \
 5. [统一清洗管线](docs/data/PREPROCESSING.md)
 6. [当前验收状态](docs/reference/VALIDATION_STATUS.md)
 7. [三模型统一微调](docs/training/THREE_MODEL_TUNING.md)
+8. [FastWAM 天机单窗口过拟合](docs/training/FASTWAM_TIANJI_OVERFIT.md)
 
 ## 仓库结构
 
@@ -163,5 +164,6 @@ python3 -m compileall -q fastwam_preprocess targets tuning scripts tests
 scripts/export_code.sh /tmp/Process_WM_Data.tar.gz
 ```
 
-当前三模型已完成真实单步与断点恢复 smoke；全量下载、九库生产训练、LingBot-VA
+当前三模型已完成真实单步与断点恢复 smoke，FastWAM 天机固定窗口已完成累计 900 步严格
+overfit；全量下载、九库生产训练、LingBot-VA
 全部 latent 和闭环评测仍有独立 readiness gate。详见 [当前验收状态](docs/reference/VALIDATION_STATUS.md)。

@@ -83,6 +83,7 @@ demo 应称为“FastWAM imagined future vs GT”，不能称为“GT-action-con
 | batch / grad accumulation | 1 / 1 | 每个 optimizer step 都是同一窗口 |
 | backbone learning rate | `2e-5` | 比常规 Stage 3 更快地记忆单窗口 |
 | memory patcher learning rate | `1e-4` | 允许三尺度 memory adapter 快速适配 |
+| video / action loss | `1.0 / 1.0` | 共享 MoT 上保持两类梯度均衡 |
 | weight decay | 0 | 过拟合诊断不施加泛化正则 |
 | scheduler | constant | 便于解释 step 数 |
 | max steps | 命令行指定，首轮 300 | 先观察 0/50/100/150/200/250/300 |
@@ -120,7 +121,7 @@ python3 scripts/tune_models.py dry-run \
   --gpus 0
 ```
 
-确认目标 GPU 至少有约 90GB 可用显存后启动：
+确认目标 GPU 至少有约 70GB 可用显存后启动：
 
 ```bash
 python3 scripts/tune_models.py run \
@@ -132,7 +133,7 @@ python3 scripts/tune_models.py run \
   --gpus 0
 ```
 
-当前 H200 上单卡训练已知占用约 85GB。不能在只剩 30GB 左右的卡上并行启动，也不能终止
+当前 H200 上单卡训练实测占用约 63GB。不能在只剩 30GB 左右的卡上并行启动，也不能终止
 其他人的任务来抢卡。
 
 ## 7. 输出
@@ -163,6 +164,11 @@ JSON 的缩写含义：
 `canonical_denormalized_mixed_units` 表示逐 slot 已回到源域单位，但全局 `action_l1` 混合了
 关节和 gripper 单位。模型选择时必须同时查看逐 slot 值，不能只解读一个全局数。
 
+ActionDiT 还有一个必须保持的推理契约：`action_dim_is_pad=true` 的 72 个无效 canonical
+维度在训练时为零，因此推理也必须在随机初始化和每个 flow-matching 去噪步后重新置零。
+若让全部 80 维都带随机噪声，动作线性嵌入会把未训练维度污染到 8 个有效维度。trainer
+必须把样本的 `action_dim_is_pad` 传给 `model.infer()`；不能只在计算 metric 时使用该 mask。
+
 ## 8. 自动汇总与门槛
 
 训练结束后执行：
@@ -170,6 +176,17 @@ JSON 的缩写含义：
 ```bash
 python3 scripts/summarize_fastwam_overfit.py \
   --run-dir work/tuning/runs/fastwam_tianji_overfit
+```
+
+若训练使用轻量 checkpoint 续跑，global step 会从 0 重新计数。用原始 run 的 step-0 作为
+统一基线，并显式给续跑 step 加 offset：
+
+```bash
+python3 scripts/summarize_fastwam_overfit.py \
+  --run-dir work/tuning/runs/fastwam_tianji_overfit_continue \
+  --baseline-run-dir work/tuning/runs/fastwam_tianji_overfit \
+  --step-offset 300 \
+  --output-dir work/tuning/runs/fastwam_tianji_overfit_verified
 ```
 
 它生成 `overfit_report.json` 和 `OVERFIT_REPORT.md`。默认候选 checkpoint 必须同时满足：
@@ -188,7 +205,48 @@ python3 scripts/summarize_fastwam_overfit.py \
 4. loss 下降但 rollout 不改善：增加 inference steps，并检查训练 scheduler 与 inference scheduler。
 5. rollout 接近 VAE 但仍模糊：这是 VAE reconstruction ceiling，不应继续归因于 DiT。
 
-## 9. 过拟合后的下一步
+## 9. 真实运行结果
+
+2026-07-19 在单张 H200 上完成了 300 optimizer steps，launcher receipt 状态为
+`succeeded`，总耗时 `405.5 s`。每 50 步保存一个约 12GB 的轻量 checkpoint；未保存约
+36GB 的 optimizer state。
+
+| 累计 step | val loss | rollout vs GT PSNR | rollout vs GT SSIM |
+|---:|---:|---:|---:|
+| 0 | 0.6428 | 10.5547 | 0.1762 |
+| 50 | 0.0301 | 17.9306 | 0.7459 |
+| 100 | 0.0203 | 19.6026 | 0.7931 |
+| 150 | 0.0188 | 23.0107 | 0.8591 |
+| 200 | 0.0111 | 23.6236 | 0.8744 |
+| 250 | 0.0100 | 24.5935 | 0.8953 |
+| 300 | 0.0068 | **25.4151** | **0.9072** |
+
+随后从 step 300 轻量权重续训 600 步，续训耗时 `748.0 s`。累计 step 900 的固定评测为
+`val_loss=0.0038`、PSNR `26.8693`、SSIM `0.9313`，已经接近 VAE vs GT 的
+`27.5665 / 0.9371` 上限。
+
+修复 action padding 后，使用完全相同的 seed、10 个 inference steps 和冻结窗口重新评测：
+
+| 指标 | Stage-2 / step 0 | overfit / step 300 | 变化 |
+|---|---:|---:|---:|
+| action L1 | 0.30233 | **0.02337** | 仅为基线的 **7.73%** |
+| action MSE | 0.17917 | **0.00104** | 降低 99.42% |
+| memory valid ratio | 1.0 | 1.0 | 全程有效 |
+| VAE vs GT PSNR / SSIM | 27.5665 / 0.9371 | 27.5665 / 0.9371 | 固定重建上限 |
+
+step 300 是首个完整验证的最小通过点。累计 step 900 的修复后 action L1 / MSE 进一步为
+`0.01941 / 0.000969`，即基线 L1 的 `6.42%`。最终严格报告为 `passed`，位于
+`work/tuning/runs/fastwam_tianji_overfit_verified/OVERFIT_REPORT.md`。最终选中权重是
+`work/tuning/runs/fastwam_tianji_overfit_continue/checkpoints/weights/step_000600.pt`
+（在原 step 300 上续训，累计 step 900）；修复后 demo 位于
+`work/tuning/runs/fastwam_tianji_eval_masked_total900/eval/step_000000_rank_000.mp4`。
+
+做过一次 `lambda_action=4` 消融。step 150 的 action L1 为 0.1924，与 1:1 的 0.1913
+持平，但视频 PSNR 只有 19.80 dB，低于 1:1 的 23.01 dB。共享 MoT 配合
+`max_grad_norm=1.0` 时，放大 action loss 会占用梯度裁剪预算，因此默认保持 1:1。该消融
+不能替代 action padding 修复。
+
+## 10. 过拟合后的下一步
 
 单窗口通过后按顺序扩大，不应直接跳到全量：
 

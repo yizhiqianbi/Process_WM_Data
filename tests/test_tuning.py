@@ -77,6 +77,8 @@ class TuningTest(unittest.TestCase):
                             "max_samples": 1,
                             "learning_rate": 2e-5,
                             "reference_learning_rate": 1e-4,
+                            "loss_lambda_video": 1.0,
+                            "loss_lambda_action": 4.0,
                             "save_every": 50,
                             "save_training_state": False,
                             "eval_every": 50,
@@ -162,6 +164,8 @@ class TuningTest(unittest.TestCase):
         self.assertIn("save_training_state=false", spec.argv)
         self.assertIn("learning_rate=2e-05", spec.argv)
         self.assertIn("reference_learning_rate=0.0001", spec.argv)
+        self.assertIn("model.loss.lambda_video=1.0", spec.argv)
+        self.assertIn("model.loss.lambda_action=4.0", spec.argv)
 
     def test_fastwam_overfit_rejects_runtime_without_memory_joint_inference(self) -> None:
         with patch.dict(os.environ, {"TEST_FASTWAM_REPO": str(self.repo)}):

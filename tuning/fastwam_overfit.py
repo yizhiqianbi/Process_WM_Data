@@ -61,6 +61,7 @@ def _candidate_checks(
 def summarize_overfit(
     records: Iterable[dict[str, Any]],
     *,
+    baseline_record: dict[str, Any] | None = None,
     min_psnr_gain: float = 3.0,
     min_ssim_gain: float = 0.05,
     max_action_l1_ratio: float = 0.5,
@@ -68,14 +69,15 @@ def summarize_overfit(
     ordered = sorted((dict(record) for record in records), key=lambda record: int(record["step"]))
     if not ordered:
         raise OverfitReportError("No FastWAM evaluation records were found.")
-    baseline = ordered[0]
+    baseline = dict(baseline_record) if baseline_record is not None else ordered[0]
     if int(baseline["step"]) != 0:
         raise OverfitReportError(
             f"Expected an eval-at-start step 0 baseline, found step {baseline['step']}."
         )
 
+    candidate_records = ordered if baseline_record is not None else ordered[1:]
     candidates = []
-    for record in ordered[1:]:
+    for record in candidate_records:
         checks = _candidate_checks(
             baseline,
             record,
@@ -159,6 +161,11 @@ def render_markdown(report: dict[str, Any]) -> str:
                 "## Selected",
                 "",
                 f"- step: `{record['step']}`",
+                *(
+                    [f"- candidate-run step: `{record['run_step']}`"]
+                    if record.get("run_step") is not None
+                    else []
+                ),
                 f"- rollout vs GT PSNR: `{float(record['psnr_rg']):.4f}`",
                 f"- rollout vs GT SSIM: `{float(record['ssim_rg']):.4f}`",
                 f"- PSNR gain: `{float(selected['psnr_gain']):.4f} dB`",

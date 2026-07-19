@@ -190,7 +190,7 @@ index 0c1f8e2..df540f0 100644
          logger.warning("No prompts found from tasks.jsonl; nothing to do.")
          return
 diff --git a/src/fastwam/models/wan22/fastwam.py b/src/fastwam/models/wan22/fastwam.py
-index 106beb3..9b05aa6 100644
+index 106beb3..c39569c 100644
 --- a/src/fastwam/models/wan22/fastwam.py
 +++ b/src/fastwam/models/wan22/fastwam.py
 @@ -101,6 +101,7 @@ class FastWAM(torch.nn.Module):
@@ -339,10 +339,38 @@ index 106beb3..9b05aa6 100644
          }
  
      @torch.no_grad()
-@@ -445,6 +519,39 @@ class FastWAM(torch.nn.Module):
+@@ -445,6 +519,67 @@ class FastWAM(torch.nn.Module):
          valid_sum = valid.sum(dim=1).clamp(min=1.0)
          return (video_loss_token * valid).sum(dim=1) / valid_sum
  
++    @staticmethod
++    def _prepare_action_dim_padding_mask(
++        action_dim_is_pad: Optional[torch.Tensor],
++        *,
++        action_dim: int,
++        device: torch.device,
++    ) -> Optional[torch.Tensor]:
++        if action_dim_is_pad is None:
++            return None
++        if action_dim_is_pad.ndim == 1:
++            action_dim_is_pad = action_dim_is_pad.unsqueeze(0)
++        expected = (1, int(action_dim))
++        if tuple(action_dim_is_pad.shape) != expected:
++            raise ValueError(
++                "action_dim_is_pad must have shape "
++                f"{expected} or ({action_dim},), got {tuple(action_dim_is_pad.shape)}"
++            )
++        return action_dim_is_pad.to(device=device, dtype=torch.bool).unsqueeze(1)
++
++    @staticmethod
++    def _mask_padded_action_dims(
++        action: torch.Tensor,
++        padding_mask: Optional[torch.Tensor],
++    ) -> torch.Tensor:
++        if padding_mask is None:
++            return action
++        return action.masked_fill(padding_mask, 0.0)
++
 +    @staticmethod
 +    def _compute_action_loss_per_sample(
 +        pred_action: torch.Tensor,
@@ -379,7 +407,7 @@ index 106beb3..9b05aa6 100644
      def training_loss(self, sample, tiled: bool = False):
          inputs = self.build_inputs(sample, tiled=tiled)
          input_latents = inputs["input_latents"]
-@@ -453,6 +560,7 @@ class FastWAM(torch.nn.Module):
+@@ -453,6 +588,7 @@ class FastWAM(torch.nn.Module):
          context_mask = inputs["context_mask"]
          action = inputs["action"]
          action_is_pad = inputs["action_is_pad"]
@@ -387,7 +415,7 @@ index 106beb3..9b05aa6 100644
          image_is_pad = inputs["image_is_pad"]
  
          noise_video = torch.randn_like(input_latents)
-@@ -468,6 +576,8 @@ class FastWAM(torch.nn.Module):
+@@ -468,6 +604,8 @@ class FastWAM(torch.nn.Module):
              latents[:, :, 0:1] = inputs["first_frame_latents"]
  
          noise_action = torch.randn_like(action)
@@ -396,7 +424,7 @@ index 106beb3..9b05aa6 100644
          timestep_action = self.train_action_scheduler.sample_training_t(
              batch_size=batch_size,
              device=self.device,
-@@ -475,6 +585,10 @@ class FastWAM(torch.nn.Module):
+@@ -475,6 +613,10 @@ class FastWAM(torch.nn.Module):
          )
          noisy_action = self.train_action_scheduler.add_noise(action, noise_action, timestep_action)
          target_action = self.train_action_scheduler.training_target(action, noise_action, timestep_action)
@@ -407,7 +435,7 @@ index 106beb3..9b05aa6 100644
  
          video_pre = self.video_expert.pre_dit(
              x=latents,
-@@ -545,20 +659,31 @@ class FastWAM(torch.nn.Module):
+@@ -545,20 +687,31 @@ class FastWAM(torch.nn.Module):
          video_weight = self.train_video_scheduler.training_weight(timestep_video).to(
              loss_video_per_sample.device, dtype=loss_video_per_sample.dtype
          )
@@ -448,6 +476,96 @@ index 106beb3..9b05aa6 100644
  
          loss_total = self.loss_lambda_video * loss_video + self.loss_lambda_action * loss_action
          loss_dict = {
+@@ -730,6 +883,7 @@ class FastWAM(torch.nn.Module):
+         num_video_frames: int,
+         action_horizon: int,
+         action: Optional[torch.Tensor] = None, # NOTE: this is gt action for conditioning videos, not for action expert
++        action_dim_is_pad: Optional[torch.Tensor] = None,
+         proprio: Optional[torch.Tensor] = None,
+         context: Optional[torch.Tensor] = None,
+         context_mask: Optional[torch.Tensor] = None,
+@@ -750,6 +904,7 @@ class FastWAM(torch.nn.Module):
+                 prompt=prompt,
+                 input_image=input_image.clone(),
+                 action_horizon=action_horizon,
++                action_dim_is_pad=action_dim_is_pad,
+                 context=context.clone() if context is not None else None,
+                 context_mask=context_mask.clone() if context_mask is not None else None,
+                 num_inference_steps=num_inference_steps,
+@@ -816,6 +971,14 @@ class FastWAM(torch.nn.Module):
+             device=rand_device,
+             dtype=torch.float32,
+         ).to(device=self.device, dtype=self.torch_dtype)
++        action_padding_mask = self._prepare_action_dim_padding_mask(
++            action_dim_is_pad,
++            action_dim=int(self.action_expert.action_dim),
++            device=self.device,
++        )
++        latents_action = self._mask_padded_action_dims(
++            latents_action, action_padding_mask
++        )
+ 
+         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
+         first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+@@ -887,6 +1050,9 @@ class FastWAM(torch.nn.Module):
+ 
+             latents_video = self.infer_video_scheduler.step(pred_video, step_delta_video, latents_video)
+             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
++            latents_action = self._mask_padded_action_dims(
++                latents_action, action_padding_mask
++            )
+             latents_video[:, :, 0:1] = first_frame_latents.clone()
+ 
+         action_out = latents_action[0].detach().to(device="cpu", dtype=torch.float32)
+@@ -908,6 +1074,7 @@ class FastWAM(torch.nn.Module):
+         prompt: Optional[str],
+         input_image: torch.Tensor,
+         action_horizon: int,
++        action_dim_is_pad: Optional[torch.Tensor] = None,
+         proprio: Optional[torch.Tensor] = None,
+         context: Optional[torch.Tensor] = None,
+         context_mask: Optional[torch.Tensor] = None,
+@@ -956,6 +1123,14 @@ class FastWAM(torch.nn.Module):
+             device=rand_device,
+             dtype=torch.float32,
+         ).to(device=self.device, dtype=self.torch_dtype)
++        action_padding_mask = self._prepare_action_dim_padding_mask(
++            action_dim_is_pad,
++            action_dim=int(self.action_expert.action_dim),
++            device=self.device,
++        )
++        latents_action = self._mask_padded_action_dims(
++            latents_action, action_padding_mask
++        )
+ 
+         input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
+         first_frame_latents = self._encode_input_image_latents_tensor(input_image=input_image, tiled=tiled)
+@@ -1042,6 +1217,9 @@ class FastWAM(torch.nn.Module):
+             pred_action = pred_action_posi
+ 
+             latents_action = self.infer_action_scheduler.step(pred_action, step_delta_action, latents_action)
++            latents_action = self._mask_padded_action_dims(
++                latents_action, action_padding_mask
++            )
+ 
+         return {
+             "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
+@@ -1055,6 +1233,7 @@ class FastWAM(torch.nn.Module):
+         num_frames: int,
+         action: Optional[torch.Tensor] = None,
+         action_horizon: Optional[int] = None,
++        action_dim_is_pad: Optional[torch.Tensor] = None,
+         proprio: Optional[torch.Tensor] = None,
+         context: Optional[torch.Tensor] = None,
+         context_mask: Optional[torch.Tensor] = None,
+@@ -1073,6 +1252,7 @@ class FastWAM(torch.nn.Module):
+             num_video_frames=num_frames,
+             action_horizon=action_horizon,
+             action=action,
++            action_dim_is_pad=action_dim_is_pad,
+             proprio=proprio,
+             context=context,
+             context_mask=context_mask,
 diff --git a/src/fastwam/models/wan22/fastwam_idm.py b/src/fastwam/models/wan22/fastwam_idm.py
 index 9bced1b..d12f4bc 100644
 --- a/src/fastwam/models/wan22/fastwam_idm.py
@@ -951,7 +1069,7 @@ index bb8ae13..d08ffe4 100644
          video_infer_shift=float(video_scheduler.get("infer_shift", 5.0)),
          video_num_train_timesteps=int(video_scheduler.get("num_train_timesteps", 1000)),
 diff --git a/src/fastwam/trainer.py b/src/fastwam/trainer.py
-index 75e0f2e..43511cc 100644
+index 75e0f2e..a36b1b8 100644
 --- a/src/fastwam/trainer.py
 +++ b/src/fastwam/trainer.py
 @@ -11,7 +11,7 @@ import numpy as np
@@ -1107,7 +1225,56 @@ index 75e0f2e..43511cc 100644
          self._apply_dit_only_train_mode(model)
  
      @staticmethod
-@@ -363,7 +424,7 @@ class Wan22Trainer:
+@@ -294,6 +355,48 @@ class Wan22Trainer:
+             proprio_encoder.train()
+             proprio_encoder.requires_grad_(True)
+ 
++    @staticmethod
++    def _action_metric_valid_mask(
++        target: torch.Tensor,
++        *,
++        dimension_valid: torch.Tensor | None = None,
++        action_is_pad: torch.Tensor | None = None,
++        action_dim_is_pad: torch.Tensor | None = None,
++    ) -> torch.Tensor:
++        if target.ndim != 3:
++            raise ValueError(f"target action metric tensor must be [B,T,D], got {tuple(target.shape)}")
++        if dimension_valid is None:
++            valid = torch.ones_like(target, dtype=torch.bool)
++        else:
++            dimension_valid = dimension_valid.to(device=target.device, dtype=torch.bool)
++            if dimension_valid.ndim != 1 or dimension_valid.shape[0] != target.shape[2]:
++                raise ValueError(
++                    "dimension_valid must be [D], got "
++                    f"{tuple(dimension_valid.shape)} for target {tuple(target.shape)}"
++                )
++            valid = dimension_valid.view(1, 1, -1).expand_as(target)
++        if action_is_pad is not None:
++            valid = valid & ~action_is_pad.to(device=target.device, dtype=torch.bool).unsqueeze(2)
++        if action_dim_is_pad is not None:
++            valid = valid & ~action_dim_is_pad.to(
++                device=target.device, dtype=torch.bool
++            ).unsqueeze(1)
++        return valid
++
++    @staticmethod
++    def _stitch_eval_video_panels(*panels: torch.Tensor) -> torch.Tensor:
++        if not panels:
++            raise ValueError("At least one evaluation video panel is required.")
++        expected = tuple(panels[0].shape)
++        if len(expected) != 4:
++            raise ValueError(f"Evaluation video panels must be [C,T,H,W], got {expected}")
++        for index, panel in enumerate(panels[1:], start=1):
++            if tuple(panel.shape) != expected:
++                raise ValueError(
++                    f"Evaluation panel {index} has shape {tuple(panel.shape)}, expected {expected}"
++                )
++        return torch.cat(panels, dim=3).contiguous()
++
+     @staticmethod
+     def _to_batched_eval_sample(sample):
+         video = sample["video"]
+@@ -363,7 +466,7 @@ class Wan22Trainer:
                      f"`context/context_mask` must be [B,L,D]/[B,L], got {tuple(context.shape)} and {tuple(context_mask.shape)}"
                  )
  
@@ -1116,7 +1283,7 @@ index 75e0f2e..43511cc 100644
              "video": video,
              "prompt": prompt,
              "action": action,
-@@ -372,6 +433,68 @@ class Wan22Trainer:
+@@ -372,6 +475,68 @@ class Wan22Trainer:
              "context_mask": context_mask,
              "action_horizon": action_horizon,
          }
@@ -1185,7 +1352,7 @@ index 75e0f2e..43511cc 100644
  
      @torch.no_grad()
      def evaluate(self):
-@@ -382,15 +505,33 @@ class Wan22Trainer:
+@@ -382,15 +547,33 @@ class Wan22Trainer:
          was_dit_training = model.dit.training
          model.eval()
  
@@ -1225,7 +1392,7 @@ index 75e0f2e..43511cc 100644
          
          prompt = sample["prompt"][0]
          video0 = sample["video"][0] # Tensor [3, T, H, W] in (-1, 1)
-@@ -409,7 +550,7 @@ class Wan22Trainer:
+@@ -409,7 +592,7 @@ class Wan22Trainer:
              "text_cfg_scale": 1.0,
              "action_cfg_scale": 1.0,
              "num_inference_steps": self.eval_num_inference_steps,
@@ -1234,7 +1401,7 @@ index 75e0f2e..43511cc 100644
              "tiled": False,
          }
          if sample["context"] is not None:
-@@ -418,6 +559,16 @@ class Wan22Trainer:
+@@ -418,6 +601,18 @@ class Wan22Trainer:
              infer_kwargs["context_mask"] = sample["context_mask"][0]
          else:
              infer_kwargs["prompt"] = prompt
@@ -1248,10 +1415,12 @@ index 75e0f2e..43511cc 100644
 +        ):
 +            if name in sample:
 +                infer_kwargs[name] = sample[name][0]
++        if "action_dim_is_pad" in sample:
++            infer_kwargs["action_dim_is_pad"] = sample["action_dim_is_pad"][0]
  
          pred = model.infer(
              **infer_kwargs,
-@@ -440,58 +591,120 @@ class Wan22Trainer:
+@@ -440,58 +635,137 @@ class Wan22Trainer:
  
          action_l1 = None
          action_l2 = None
@@ -1304,8 +1473,6 @@ index 75e0f2e..43511cc 100644
 -
 -            pred_action_denorm = denorm_actions["pred"]
 -            gt_action_denorm = denorm_actions["gt"]
--
--            if pred_action_denorm.shape != gt_action_denorm.shape:
 +            lerobot_dataset = getattr(self.val_dataset, "lerobot_dataset", None)
 +            processor = getattr(lerobot_dataset, "processor", None)
 +            if processor is not None:
@@ -1359,11 +1526,20 @@ index 75e0f2e..43511cc 100644
 +                    pred_metric = pred_metric.unsqueeze(0)
 +                if gt_metric.ndim == 2:
 +                    gt_metric = gt_metric.unsqueeze(0)
-+                valid = (pred_valid & gt_valid).view(1, 1, -1).expand_as(gt_metric)
-+                if sample.get("action_is_pad") is not None:
-+                    valid &= ~sample["action_is_pad"].detach().cpu().unsqueeze(2)
-+                if sample.get("action_dim_is_pad") is not None:
-+                    valid &= ~sample["action_dim_is_pad"].detach().cpu().unsqueeze(1)
++                valid = self._action_metric_valid_mask(
++                    gt_metric,
++                    dimension_valid=pred_valid & gt_valid,
++                    action_is_pad=(
++                        None
++                        if sample.get("action_is_pad") is None
++                        else sample["action_is_pad"].detach().cpu()
++                    ),
++                    action_dim_is_pad=(
++                        None
++                        if sample.get("action_dim_is_pad") is None
++                        else sample["action_dim_is_pad"].detach().cpu()
++                    ),
++                )
 +                action_metric_space = "canonical_denormalized_mixed_units"
 +            else:
 +                pred_metric = pred_action.detach().to(device="cpu", dtype=torch.float32)
@@ -1372,13 +1548,22 @@ index 75e0f2e..43511cc 100644
 +                    pred_metric = pred_metric.unsqueeze(0)
 +                if gt_metric.ndim == 2:
 +                    gt_metric = gt_metric.unsqueeze(0)
-+                valid = torch.ones_like(gt_metric, dtype=torch.bool)
-+                if sample.get("action_is_pad") is not None:
-+                    valid &= ~sample["action_is_pad"].detach().cpu().unsqueeze(2)
-+                if sample.get("action_dim_is_pad") is not None:
-+                    valid &= ~sample["action_dim_is_pad"].detach().cpu().unsqueeze(1)
++                valid = self._action_metric_valid_mask(
++                    gt_metric,
++                    action_is_pad=(
++                        None
++                        if sample.get("action_is_pad") is None
++                        else sample["action_is_pad"].detach().cpu()
++                    ),
++                    action_dim_is_pad=(
++                        None
++                        if sample.get("action_dim_is_pad") is None
++                        else sample["action_dim_is_pad"].detach().cpu()
++                    ),
++                )
 +                action_metric_space = "normalized_zscore"
-+
+ 
+-            if pred_action_denorm.shape != gt_action_denorm.shape:
 +            if pred_metric.shape != gt_metric.shape:
                  raise ValueError(
 -                    "Predicted action/GT action shape mismatch after denormalization: "
@@ -1417,13 +1602,21 @@ index 75e0f2e..43511cc 100644
  
          # 4. VAE reconstruction metrics against GT video
          gt_video_batch = video0.unsqueeze(0).to(device=model.device, dtype=model.torch_dtype)
-@@ -515,15 +728,30 @@ class Wan22Trainer:
-             dim=2,
-         ).contiguous()
+@@ -510,20 +784,34 @@ class Wan22Trainer:
+         psnr_rollout_vs_decode = video_psnr(pred=pred_video_tensor, target=vae_video_tensor)
+         ssim_rollout_vs_decode = video_ssim(pred=pred_video_tensor, target=vae_video_tensor)
+ 
+-        stitched_video_tensor = torch.cat(
+-            [pred_video_tensor, vae_video_tensor, gt_video_tensor],
+-            dim=2,
+-        ).contiguous()
++        stitched_video_tensor = self._stitch_eval_video_panels(
++            pred_video_tensor, vae_video_tensor, gt_video_tensor
++        )
          stitched_frames = []
 +        panel_width = int(gt_video_tensor.shape[3])
 +        labels = ("IMAGINATION", "VAE RECONSTRUCTION", "GROUND TRUTH")
-+        label_height = 28
++        label_height = 32
          for t in range(stitched_video_tensor.shape[1]):
              frame = (stitched_video_tensor[:, t].permute(1, 2, 0).clamp(0.0, 1.0).numpy() * 255.0).astype(np.uint8)
 -            stitched_frames.append(Image.fromarray(frame))
@@ -1435,7 +1628,7 @@ index 75e0f2e..43511cc 100644
 +            draw = ImageDraw.Draw(labeled)
 +            for panel_index, label in enumerate(labels):
 +                draw.text(
-+                    (panel_index * panel_width + 8, 7),
++                    (panel_index * panel_width + 8, 9),
 +                    label,
 +                    fill=(255, 255, 255),
 +                )
@@ -1450,7 +1643,7 @@ index 75e0f2e..43511cc 100644
  
          local_metrics = torch.tensor(
              [
-@@ -562,6 +790,45 @@ class Wan22Trainer:
+@@ -562,6 +850,45 @@ class Wan22Trainer:
              result["action_l2"] = float(action_l2_mean)
          if action_l1_mean is not None:
              result["action_l1"] = float(action_l1_mean)
@@ -1496,7 +1689,7 @@ index 75e0f2e..43511cc 100644
          return result
  
      def _save_weights_checkpoint(self, step_tag: str):
-@@ -590,6 +857,9 @@ class Wan22Trainer:
+@@ -590,6 +917,9 @@ class Wan22Trainer:
          self.accelerator.wait_for_everyone()
  
          state_path = os.path.join(self.state_dir, step_tag)
@@ -1506,7 +1699,7 @@ index 75e0f2e..43511cc 100644
          ensure_dir(state_path)
          self.accelerator.save_state(output_dir=state_path)
          if self.accelerator.is_main_process:
-@@ -652,9 +922,23 @@ class Wan22Trainer:
+@@ -652,9 +982,23 @@ class Wan22Trainer:
              raise ValueError("`max_steps` must be set before entering the while-step training loop.")
  
          logger.info("Starting training with max_steps=%d.", self.max_steps)
@@ -1531,7 +1724,7 @@ index 75e0f2e..43511cc 100644
  
          while self.global_step < self.max_steps:
              try:
-@@ -690,7 +974,7 @@ class Wan22Trainer:
+@@ -690,7 +1034,7 @@ class Wan22Trainer:
                          global_loss_metrics[key] = float(
                              self.accelerator.gather(metric_tensor).mean().item()
                          )
@@ -1540,7 +1733,7 @@ index 75e0f2e..43511cc 100644
                      global_grad_norm = float(self.accelerator.gather(grad_norm_tensor).mean().item())
  
                      current_lr = float(self.optimizer.param_groups[0]["lr"])
-@@ -733,11 +1017,11 @@ class Wan22Trainer:
+@@ -733,11 +1077,11 @@ class Wan22Trainer:
                          metrics = self.evaluate()
                          self.accelerator.wait_for_everyone()
                          if metrics is not None and self.accelerator.is_main_process:
@@ -1555,7 +1748,7 @@ index 75e0f2e..43511cc 100644
                              )
                              if "action_l2" in metrics:
                                  description += " action_l2=%.4f" % metrics["action_l2"]
-@@ -759,6 +1043,7 @@ class Wan22Trainer:
+@@ -759,6 +1103,7 @@ class Wan22Trainer:
                                  eval_payload["eval/action_l1"] = float(metrics["action_l1"])
                              self._wandb_log(eval_payload)
  
@@ -1563,7 +1756,7 @@ index 75e0f2e..43511cc 100644
                      if self.save_every > 0 and self.global_step % self.save_every == 0:
                          ckpt_info = self.save_checkpoint()
                          if self.accelerator.is_main_process:
-@@ -770,7 +1055,8 @@ class Wan22Trainer:
+@@ -770,7 +1115,8 @@ class Wan22Trainer:
                              )
  
                      if self.global_step >= self.max_steps:
@@ -3682,10 +3875,10 @@ index 0000000..6662ba3
 +        return sample
 diff --git a/src/fastwam/models/wan22/memory_fastwam.py b/src/fastwam/models/wan22/memory_fastwam.py
 new file mode 100644
-index 0000000..4ec5c0a
+index 0000000..169819f
 --- /dev/null
 +++ b/src/fastwam/models/wan22/memory_fastwam.py
-@@ -0,0 +1,1202 @@
+@@ -0,0 +1,1229 @@
 +from __future__ import annotations
 +
 +from typing import Any, Mapping, Optional
@@ -4134,6 +4327,7 @@ index 0000000..4ec5c0a
 +        prompt: Optional[str],
 +        input_image: torch.Tensor,
 +        action_horizon: int,
++        action_dim_is_pad: Optional[torch.Tensor] = None,
 +        proprio: Optional[torch.Tensor] = None,
 +        memory_video: Optional[torch.Tensor] = None,
 +        memory_video_long: Optional[torch.Tensor] = None,
@@ -4224,6 +4418,14 @@ index 0000000..4ec5c0a
 +            device=rand_device,
 +            dtype=torch.float32,
 +        ).to(device=self.device, dtype=self.torch_dtype)
++        action_padding_mask = self._prepare_action_dim_padding_mask(
++            action_dim_is_pad,
++            action_dim=int(self.action_expert.action_dim),
++            device=self.device,
++        )
++        latents_action = self._mask_padded_action_dims(
++            latents_action, action_padding_mask
++        )
 +
 +        input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
 +        memory_inputs = self._prepare_inference_memory(
@@ -4299,6 +4501,9 @@ index 0000000..4ec5c0a
 +            )
 +            latents_action = self.infer_action_scheduler.step(
 +                pred_action, step_delta, latents_action
++            )
++            latents_action = self._mask_padded_action_dims(
++                latents_action, action_padding_mask
 +            )
 +        return {
 +            "action": latents_action[0].detach().to(device="cpu", dtype=torch.float32),
@@ -4383,6 +4588,7 @@ index 0000000..4ec5c0a
 +        num_video_frames: int,
 +        action_horizon: int,
 +        action: Optional[torch.Tensor] = None,
++        action_dim_is_pad: Optional[torch.Tensor] = None,
 +        proprio: Optional[torch.Tensor] = None,
 +        memory_video: Optional[torch.Tensor] = None,
 +        memory_video_long: Optional[torch.Tensor] = None,
@@ -4524,6 +4730,14 @@ index 0000000..4ec5c0a
 +            device=rand_device,
 +            dtype=torch.float32,
 +        ).to(device=self.device, dtype=self.torch_dtype)
++        action_padding_mask = self._prepare_action_dim_padding_mask(
++            action_dim_is_pad,
++            action_dim=int(self.action_expert.action_dim),
++            device=self.device,
++        )
++        latents_action = self._mask_padded_action_dims(
++            latents_action, action_padding_mask
++        )
 +
 +        input_image = input_image.to(device=self.device, dtype=self.torch_dtype)
 +        first_frame_latents = self._encode_input_image_latents_tensor(
@@ -4555,6 +4769,7 @@ index 0000000..4ec5c0a
 +                prompt=None,
 +                input_image=input_image,
 +                action_horizon=int(action_horizon),
++                action_dim_is_pad=action_dim_is_pad,
 +                proprio=None,
 +                memory_video=memory_video,
 +                memory_video_long=memory_video_long,
@@ -4620,6 +4835,9 @@ index 0000000..4ec5c0a
 +            latents_action = self.infer_action_scheduler.step(
 +                pred_action, step_delta_action, latents_action
 +            )
++            latents_action = self._mask_padded_action_dims(
++                latents_action, action_padding_mask
++            )
 +            latents_video[:, :, :1] = first_frame_latents
 +
 +        if memory_valid is None:
@@ -4648,6 +4866,7 @@ index 0000000..4ec5c0a
 +        num_frames: int,
 +        action: Optional[torch.Tensor] = None,
 +        action_horizon: Optional[int] = None,
++        action_dim_is_pad: Optional[torch.Tensor] = None,
 +        proprio: Optional[torch.Tensor] = None,
 +        memory_video: Optional[torch.Tensor] = None,
 +        memory_video_long: Optional[torch.Tensor] = None,
@@ -4676,6 +4895,7 @@ index 0000000..4ec5c0a
 +            num_video_frames=num_frames,
 +            action_horizon=int(action_horizon),
 +            action=action,
++            action_dim_is_pad=action_dim_is_pad,
 +            proprio=proprio,
 +            memory_video=memory_video,
 +            memory_video_long=memory_video_long,
@@ -4890,10 +5110,10 @@ index 0000000..4ec5c0a
 +        return payload
 diff --git a/tests/test_masked_losses.py b/tests/test_masked_losses.py
 new file mode 100644
-index 0000000..d6940ea
+index 0000000..eb5da53
 --- /dev/null
 +++ b/tests/test_masked_losses.py
-@@ -0,0 +1,98 @@
+@@ -0,0 +1,142 @@
 +import unittest
 +
 +import torch
@@ -4988,6 +5208,50 @@ index 0000000..d6940ea
 +        self.assertEqual(tuple(batched["memory_video_long"].shape), (1, 3, 8, 16, 16))
 +        self.assertEqual(tuple(batched["memory_mask_short"].shape), (1, 1))
 +        self.assertEqual(int(batched["window_start"][0]), 40)
++
++    def test_action_metric_mask_supports_expanded_dimension_mask(self):
++        target = torch.zeros(1, 3, 4)
++        valid = Wan22Trainer._action_metric_valid_mask(
++            target,
++            dimension_valid=torch.tensor([True, False, True, False]),
++            action_is_pad=torch.tensor([[False, False, True]]),
++            action_dim_is_pad=torch.tensor([[False, False, False, True]]),
++        )
++
++        self.assertEqual(tuple(valid.shape), (1, 3, 4))
++        self.assertEqual(int(valid.sum()), 4)
++        self.assertTrue(valid[0, :2, 0].all())
++        self.assertTrue(valid[0, :2, 2].all())
++        self.assertFalse(valid[0, 2].any())
++
++    def test_action_inference_padding_mask_zeros_inactive_dimensions(self):
++        padding = FastWAM._prepare_action_dim_padding_mask(
++            torch.tensor([False, True, False, True]),
++            action_dim=4,
++            device=torch.device("cpu"),
++        )
++        action = torch.arange(24, dtype=torch.float32).view(1, 6, 4)
++
++        masked = FastWAM._mask_padded_action_dims(action, padding)
++
++        self.assertEqual(tuple(padding.shape), (1, 1, 4))
++        self.assertTrue((masked[:, :, [1, 3]] == 0).all())
++        torch.testing.assert_close(masked[:, :, [0, 2]], action[:, :, [0, 2]])
++
++    def test_action_inference_padding_mask_rejects_wrong_width(self):
++        with self.assertRaisesRegex(ValueError, "action_dim_is_pad"):
++            FastWAM._prepare_action_dim_padding_mask(
++                torch.zeros(3, dtype=torch.bool),
++                action_dim=4,
++                device=torch.device("cpu"),
++            )
++
++    def test_eval_video_panels_are_stitched_horizontally(self):
++        panel = torch.zeros(3, 21, 384, 320)
++
++        stitched = Wan22Trainer._stitch_eval_video_panels(panel, panel, panel)
++
++        self.assertEqual(tuple(stitched.shape), (3, 21, 384, 960))
 +
 +
 +if __name__ == "__main__":

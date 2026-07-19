@@ -50,6 +50,8 @@ models:
         gradient_accumulation_steps: 1
         learning_rate: 2.0e-5
         reference_learning_rate: 1.0e-4
+        loss_lambda_video: 1.0
+        loss_lambda_action: 1.0
         weight_decay: 0.0
         max_grad_norm: 1.0
         lr_scheduler_type: constant

@@ -141,6 +141,13 @@ def build_fastwam_command(
     for key in ("lr_scheduler_type", "mixed_precision", "sampling_strategy"):
         if key in phase_cfg:
             argv.append(f"{key}={phase_cfg[key]}")
+    for name in ("video", "action"):
+        key = f"loss_lambda_{name}"
+        if key in phase_cfg:
+            value = float(phase_cfg[key])
+            if value < 0:
+                raise TuningConfigError(f"FastWAM {key} must be non-negative")
+            argv.append(f"model.loss.lambda_{name}={value}")
     normalization = model.get("normalization_stats")
     if include_robot:
         if not normalization:
