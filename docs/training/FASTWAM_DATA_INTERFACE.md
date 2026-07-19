@@ -1,10 +1,16 @@
 # FastWAM 统一数据对齐与训练调试手册
 
+[文档索引](../README.md)
+
 更新日期：2026-07-15
 
 本文记录从 `TrainingCaseV1` 到 FastWAM 训练 batch 的完整契约、实际代码路径、
 RoboCOIN 真实数据验证结果、checkpoint 恢复结果，以及其余异构数据集接入时必须满足的条件。
 当前范围只包含 FastWAM，不涉及 Cosmos。
+
+本文只维护 `TrainingCaseV1 -> FastWAM batch -> loss` 的接口合同和接入证据；阶段调度、
+参数冻结和 checkpoint 交接见 [FastWAM Three-Stage](FASTWAM_THREE_STAGE.md)，最新验收状态见
+[Validation Status](../reference/VALIDATION_STATUS.md)。
 
 ## 1. 当前结论
 
@@ -298,7 +304,7 @@ proprio token 会被置零并在 context mask 中关闭。
 ## 8. 当前限制与下一步
 
 - 本文记录的 optimizer/checkpoint 基线只覆盖 RoboCOIN 两个验证 episode；AgiBot proprio 的
-  真实 data/memory loader 回归见 `AGIBOT_PROPRIO_TRAINING.md`，尚待 GPU 单步 optimizer 验收。
+  真实 data/memory loader 回归见 [AgiBot 专题](../datasets/AGIBOT.md)，尚待 GPU 单步 optimizer 验收。
 - tar 内视频已可正确解码，但压缩 archive 的随机访问成本高；大规模训练应先做本地视频 shard/cache。
 - 当前 production 配置默认关闭 rollout eval，以控制 21 帧扩散采样的成本。canonical evaluator
   已保留维度/时间 mask 并可报告 normalized-space action L1/L2；若需要物理单位指标，还需为每个

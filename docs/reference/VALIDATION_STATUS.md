@@ -1,5 +1,7 @@
 # FastWAM Preprocessing Validation Status
 
+[文档索引](../README.md)
+
 Updated: 2026-07-18
 
 This page records what has been demonstrated by executable tests and real source files. It is
@@ -38,7 +40,7 @@ use 81 state points, 80 actions, and 21 video points.
 
 The full upstream repositories, full video decode, normalization rebuild, and GPU optimizer
 regression remain pending. Exact source layouts and commands are in
-`LINGBOT_VA_DREAMZERO.md`.
+[LingBot-VA / DreamZero](../datasets/LINGBOT_VA_DREAMZERO.md).
 
 ## AgiBot real-data proof
 
@@ -104,5 +106,8 @@ causal-memory data path for a real AgiBot episode. Production Stage 2 still requ
 4. One GPU optimizer/checkpoint/resume smoke with both video and action losses finite.
 5. A nine-domain balanced optimizer regression before long-running pretraining.
 
-Detailed contracts are in `AGIBOT_PROPRIO_TRAINING.md`, `LINGBOT_VA_DREAMZERO.md`,
-`ACTION_DATA_ADMISSION.md`, `CLEANING_PIPELINE_V2.md`, and `THREE_STAGE_FASTWAM_TRAINING.md`.
+Detailed contracts are in [AgiBot](../datasets/AGIBOT.md),
+[LingBot-VA / DreamZero](../datasets/LINGBOT_VA_DREAMZERO.md),
+[Action Admission](../data/ACTION_ADMISSION.md),
+[Preprocessing](../data/PREPROCESSING.md), and
+[FastWAM Three-Stage](../training/FASTWAM_THREE_STAGE.md).

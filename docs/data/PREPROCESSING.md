@@ -1,12 +1,18 @@
 # FastWAM Cleaning Pipeline V2
 
+[文档索引](../README.md)
+
 本文档描述 `Preprocess_FastWAM` 当前可执行的第二版数据清洗设计。它参考：
 
-`../World+Action+Model+-+Data+Statistics_(1)(1).pdf`
+`$FASTWAM_DATA_ROOT/World+Action+Model+-+Data+Statistics_(1)(1).pdf`
 
 目标不是把 PDF 中的经验阈值原样复制，而是把其中的三级清洗思想改造成适用于 OXE、
-OXE-AugE、AgiBot-Beta、RoboCOIN、RoboMIND、Galaxea 和 InternData-A1 的统一、可审计、
-可分阶段训练的数据契约。
+OXE-AugE、AgiBot-Beta、RoboCOIN、RoboMIND、Galaxea、InternData-A1、LingBot-VA 和
+DreamZero-DROID 的统一、可审计、可分阶段训练的数据契约。
+
+本文只维护通用算法和阈值设计。逐库 action 证据见
+[Action Admission](ACTION_ADMISSION.md)，当前实测状态见
+[Validation Status](../reference/VALIDATION_STATUS.md)。
 
 ## 1. 结论
 
@@ -327,11 +333,11 @@ Tier 只表达能力边界：
 `trajectory fingerprint > visual fingerprint > source URI`。训练 split 当前使用
 `lineage_id > source identity`，因此可选的视觉审计开关不会改变 split。
 
-限制：当前 dedupe 状态只在一次 clean invocation 内比较，尚不会自动重写 split group。七数据集全局精确/近似去重仍应增加一个独立汇总阶段，
+限制：当前 dedupe 状态只在一次 clean invocation 内比较，尚不会自动重写 split group。九数据集全局精确/近似去重仍应增加一个独立汇总阶段，
 把所有 cleaned manifest 的 fingerprint 合并后再冻结 train/validation/test split。尤其需要把 OXE-AugE 原图、
 机器人替换视图、inpainting variant 和 OXE 源 episode 绑定到同一 lineage group。
 
-## 9. 七数据集覆盖
+## 9. 九数据集覆盖
 
 | 数据集 | Level 1 | Level 2 | Action 训练现状 |
 | --- | --- | --- | --- |
@@ -342,6 +348,8 @@ Tier 只表达能力边界：
 | RoboMIND | 官方本体表驱动的 HDF5 state/action reader | HDF5 内嵌 JPEG/array 已支持 | 表内本体可进入 A；未知本体保持 B |
 | Galaxea | tar 内 Parquet 和 canonical-active signal audit | tar.gz 内 MP4 已支持 | R1-lite 实样进入 A，24 个 action window |
 | InternData-A1 | LeRobot 原生 `actions.*` 和 state 已支持 | 多路 MP4 已支持 | A2D 实样 20D mapping/alignment 通过，进入 A |
+| LingBot-VA | RoboTwin/LIBERO LeRobot schema 已支持 | 多路 MP4 已支持 | 已验证 schema 可进入 A；未知 schema 保持 B |
+| DreamZero-DROID | GEAR `modality.json` slice 已支持 | 双外部视角 + wrist MP4 已支持 | 已验证 Panda joint/gripper slice 可进入 A |
 
 “支持视觉审计”不等于“全量下载完成”，也不等于“action 语义已验证”。三种状态必须分开记录。
 
@@ -500,7 +508,7 @@ python3 -m fastwam_preprocess.cli windows \
 
 在这些工作完成前，当前管线适合生成可追溯的 Stage 1 语料和已验证 embodiment 的 Stage 2
 candidate，不应把 OXE 未审核子集、RoboMIND 未知本体或尚未 join 到 proprio 的 AgiBot observation 自动打开 action loss。
-逐数据集证据、mapping 和 81 帧结果见 `ACTION_DATA_ADMISSION.md`。
+逐数据集证据、mapping 和 81 帧结果见 [Action Admission](ACTION_ADMISSION.md)。
 
 ## 15. 验证命令
 

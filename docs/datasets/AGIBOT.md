@@ -1,5 +1,7 @@
 # AgiBot-Beta Proprio 清洗与 FastWAM 训练接入
 
+[文档索引](../README.md)
+
 更新日期：2026-07-18
 
 本文给出 AgiBot-Beta 从官方 `proprio_stats` 到 MemoryFastWAM Stage 2 的完整可执行合同。
@@ -36,7 +38,8 @@ memory_video_short     [3, 1, 384, 320]
 camera_present_mask    [true, true, true]
 ```
 
-稳定的仓库级通过/待验矩阵见 `VALIDATION_STATUS.md`。运行中的下载字节数属于机器状态，不写入
+稳定的仓库级通过/待验矩阵见
+[Validation Status](../reference/VALIDATION_STATUS.md)。运行中的下载字节数属于机器状态，不写入
 Git；下载完成以 size-verified receipt 的 `status=ok` 为准。
 
 ## 2. 下载边界

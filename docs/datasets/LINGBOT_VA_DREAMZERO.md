@@ -1,8 +1,13 @@
 # LingBot-VA and DreamZero to FastWAM
 
+[文档索引](../README.md)
+
 本文说明 `lingbot_va` 和 `dreamzero` 两个适配器的输入合同、相机布局、
 action/state 映射、清洗门槛、下载方式和已完成验证。这里处理的是数据，不包含
 LingBot-VA、DreamZero 或其他模型权重。
+
+这里的 LingBot-VA 是数据源，不是 LingBot-VLA v2 模型。整体通过/待验状态统一见
+[Validation Status](../reference/VALIDATION_STATUS.md)。
 
 ## 1. 实现范围
 

@@ -1,9 +1,15 @@
 # FastWAM Raw Dataset Download
 
+[文档索引](../README.md)
+
 This document is the portable download runbook for OXE, OXE-AugE, AgiBot-Beta,
 RoboCOIN, RoboMIND, Galaxea, InternData-A1, LingBot-VA post-training data, and
 DreamZero-DROID. The code directory does not contain credentials, raw data, Hugging Face
 cache, or download logs.
+
+本文只维护下载、断点续传、revision 锁定和完整性验证。数据可否进入 action loss 见
+[Action Admission](ACTION_ADMISSION.md)，已经完成的下载/验证状态见
+[Validation Status](../reference/VALIDATION_STATUS.md)。
 
 ## 1. Local layout
 
