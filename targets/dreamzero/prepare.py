@@ -236,6 +236,173 @@ def _write_hydra_patch(
         yaml.safe_dump(patch, handle, allow_unicode=True, sort_keys=False)
 
 
+def _write_training_profile(
+    path: Path,
+    *,
+    embodiment_tag: str,
+    modality: dict[str, Any],
+    relative_action_keys: list[str],
+    fps: float,
+    num_frames: int,
+    action_horizon: int,
+) -> None:
+    keys = {
+        group: [f"{group}.{key}" for key in (modality.get(group) or {})]
+        for group in ("video", "state", "action")
+    }
+    language_keys = [
+        f"annotation.{key}" for key in (modality.get("annotation") or {})
+    ]
+    modality_config = {
+        "video": {
+            "_target_": "groot.vla.data.dataset.ModalityConfig",
+            "delta_indices": list(range(num_frames)),
+            "eval_delta_indices": [0],
+            "modality_keys": keys["video"],
+        },
+        "state": {
+            "_target_": "groot.vla.data.dataset.ModalityConfig",
+            "delta_indices": [0],
+            "modality_keys": keys["state"],
+        },
+        "action": {
+            "_target_": "groot.vla.data.dataset.ModalityConfig",
+            "delta_indices": list(range(action_horizon)),
+            "modality_keys": keys["action"],
+        },
+        "language": {
+            "_target_": "groot.vla.data.dataset.ModalityConfig",
+            "delta_indices": [0],
+            "modality_keys": language_keys,
+        },
+    }
+    state_modes = {key: "q99" for key in keys["state"]}
+    action_modes = {key: "q99" for key in keys["action"]}
+    transforms = [
+        {
+            "_target_": "groot.vla.data.transform.VideoToTensor",
+            "apply_to": keys["video"],
+        },
+        {
+            "_target_": "groot.vla.data.transform.VideoCrop",
+            "apply_to": keys["video"],
+            "scale": 0.95,
+            "mode": "random",
+        },
+        {
+            "_target_": "groot.vla.data.transform.VideoResize",
+            "apply_to": keys["video"],
+            "height": "${image_resolution_height}",
+            "width": "${image_resolution_width}",
+            "interpolation": "linear",
+        },
+        {
+            "_target_": "groot.vla.data.transform.VideoColorJitter",
+            "apply_to": keys["video"],
+            "brightness": 0.3,
+            "contrast": 0.4,
+            "saturation": 0.5,
+            "hue": 0.08,
+        },
+        {
+            "_target_": "groot.vla.data.transform.VideoToNumpy",
+            "apply_to": keys["video"],
+        },
+        {
+            "_target_": "groot.vla.data.transform.StateActionToTensor",
+            "apply_to": keys["state"],
+        },
+        {
+            "_target_": "groot.vla.data.transform.StateActionTransform",
+            "apply_to": keys["state"],
+            "normalization_modes": state_modes,
+        },
+        {
+            "_target_": "groot.vla.data.transform.StateActionToTensor",
+            "apply_to": keys["action"],
+        },
+        {
+            "_target_": "groot.vla.data.transform.StateActionTransform",
+            "apply_to": keys["action"],
+            "normalization_modes": action_modes,
+        },
+        {
+            "_target_": "groot.vla.data.transform.ConcatTransform",
+            "video_concat_order": keys["video"],
+            "state_concat_order": keys["state"],
+            "action_concat_order": keys["action"],
+        },
+        "${model_specific_transform}",
+    ]
+    root_key = f"{embodiment_tag}_data_root"
+    profile = {
+        "defaults": ["dreamzero/base_48_wan_fine_aug_relative", "_self_"],
+        "max_state_dim": 64,
+        "use_global_metadata": False,
+        "relative_action": True,
+        "relative_action_per_horizon": False,
+        "relative_action_keys": relative_action_keys,
+        "max_chunk_size": 5,
+        "dataset_shard_sampling_rate": 0.1,
+        "mixture_dataset_cls": (
+            "groot.vla.data.dataset.lerobot_sharded."
+            "ShardedLeRobotMixtureDataset.from_mixture_spec"
+        ),
+        "single_dataset_cls": (
+            "groot.vla.data.dataset.lerobot_sharded."
+            "ShardedLeRobotSubLangSingleActionChunkDatasetDROID"
+        ),
+        root_key: "???",
+        f"modality_config_{embodiment_tag}": modality_config,
+        f"transform_{embodiment_tag}": {
+            "_target_": "groot.vla.data.transform.ComposedModalityTransform",
+            "transforms": transforms,
+        },
+        "modality_configs": {
+            embodiment_tag: f"${{modality_config_{embodiment_tag}}}"
+        },
+        "transforms": {embodiment_tag: f"${{transform_{embodiment_tag}}}"},
+        "metadata_versions": {embodiment_tag: "local"},
+        "fps": {embodiment_tag: fps},
+        "train_dataset": {
+            "_target_": "${mixture_dataset_cls}",
+            "_convert_": "object",
+            "mixture_spec": [
+                {
+                    "dataset_path": {
+                        embodiment_tag: [f"${{{root_key}}}"]
+                    },
+                    "dataset_weight": 1.0,
+                    "distribute_weights": True,
+                }
+            ],
+            "dataset_class": "${single_dataset_cls}",
+            "all_modality_configs": "${modality_configs}",
+            "all_transforms": "${transforms}",
+            "metadata_versions": "${metadata_versions}",
+            "fps": "${fps}",
+            "dataset_kwargs": {
+                "video_backend": "decord",
+                "use_global_metadata": "${use_global_metadata}",
+                "max_chunk_size": "${max_chunk_size}",
+                "relative_action": "${relative_action}",
+                "relative_action_keys": "${relative_action_keys}",
+                "relative_action_per_horizon": "${relative_action_per_horizon}",
+            },
+            "mixture_kwargs": {
+                "training": True,
+                "balance_dataset_weights": False,
+                "seed": 42,
+                "shard_sampling_rate": "${dataset_shard_sampling_rate}",
+            },
+        },
+    }
+    path.parent.mkdir(parents=True, exist_ok=True)
+    with path.open("w", encoding="utf-8") as handle:
+        handle.write("# @package _global_\n\n")
+        yaml.safe_dump(profile, handle, allow_unicode=True, sort_keys=False)
+
+
 def prepare_dreamzero_target(
     source_root: Path,
     output_root: Path,
@@ -334,12 +501,25 @@ def prepare_dreamzero_target(
             num_frames=num_frames,
             action_horizon=action_horizon,
         )
+        _write_training_profile(
+            staging / "meta" / "dreamzero_training_profile.yaml",
+            embodiment_tag=embodiment_tag,
+            modality=modality,
+            relative_action_keys=relative_keys,
+            fps=fps,
+            num_frames=num_frames,
+            action_horizon=action_horizon,
+        )
         receipt = {
             "schema_version": TARGET_SCHEMA_VERSION,
             "status": (
-                "prepared_native_profile"
-                if profile.get("upstream_profile_registered")
-                else "prepared_requires_upstream_profile_registration"
+                "prepared_requires_upstream_profile_registration"
+                if not profile.get("upstream_profile_registered")
+                else (
+                    "prepared_requires_profile_installation"
+                    if profile.get("profile_install_required")
+                    else "prepared_native_profile"
+                )
             ),
             "source_root": str(source.root),
             "source_info_sha256": file_sha256(source.info_path),
@@ -357,6 +537,7 @@ def prepare_dreamzero_target(
             "action_horizon": action_horizon,
             "relative_action_keys": relative_keys,
             "upstream_profile_registered": bool(profile.get("upstream_profile_registered")),
+            "profile_install_required": bool(profile.get("profile_install_required")),
         }
         write_json(staging / "meta" / "dreamzero_target_receipt.json", receipt)
 
@@ -371,6 +552,7 @@ def validate_dreamzero_target(root: Path, *, verify_files: bool = False) -> dict
         "stats": dataset.meta_root / "stats.json",
         "relative_stats": dataset.meta_root / "relative_stats_dreamzero.json",
         "hydra_patch": dataset.meta_root / "dreamzero_hydra_patch.yaml",
+        "training_profile": dataset.meta_root / "dreamzero_training_profile.yaml",
         "receipt": dataset.meta_root / "dreamzero_target_receipt.json",
     }
     failures = [f"missing_{name}" for name, path in required.items() if not path.is_file()]
@@ -395,16 +577,45 @@ def validate_dreamzero_target(root: Path, *, verify_files: bool = False) -> dict
             dataset.read_column(dataset.episode_indices[0], column)
         except TargetPreparationError as exc:
             failures.append(str(exc))
+    profile_install_required = bool(receipt.get("profile_install_required"))
+    profile_installed = not profile_install_required
+    profile_install_failure = None
+    if profile_install_required:
+        install_receipt_path = dataset.meta_root / "dreamzero_profile_install_receipt.json"
+        if not install_receipt_path.is_file():
+            profile_install_failure = "missing_profile_install_receipt"
+        else:
+            try:
+                install_receipt = read_json(install_receipt_path)
+                destination = Path(str(install_receipt.get("destination") or ""))
+                expected_sha256 = file_sha256(required["training_profile"])
+                profile_installed = (
+                    install_receipt.get("embodiment_tag") == receipt.get("embodiment_tag")
+                    and install_receipt.get("source_sha256") == expected_sha256
+                    and destination.is_file()
+                    and file_sha256(destination) == expected_sha256
+                )
+                if not profile_installed:
+                    profile_install_failure = "stale_or_mismatched_profile_install_receipt"
+            except (OSError, ValueError, TypeError) as exc:
+                profile_install_failure = f"invalid_profile_install_receipt:{exc}"
     return {
         "target": "dreamzero",
         "schema_version": receipt.get("schema_version"),
         "valid": not failures,
-        "ready_for_training": not failures and bool(receipt.get("upstream_profile_registered")),
+        "ready_for_training": (
+            not failures
+            and bool(receipt.get("upstream_profile_registered"))
+            and profile_installed
+        ),
         "episode_count": len(dataset.episodes),
         "embodiment_tag": receipt.get("embodiment_tag"),
         "requires_upstream_profile_registration": not bool(
             receipt.get("upstream_profile_registered")
         ),
+        "profile_install_required": profile_install_required,
+        "profile_installed": profile_installed,
+        "profile_install_failure": profile_install_failure,
         "failures": failures,
     }
 

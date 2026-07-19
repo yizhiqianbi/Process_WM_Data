@@ -29,6 +29,7 @@
 4. [Action 准入证据](data/ACTION_ADMISSION.md)
 5. [FastWAM 数据接口](training/FASTWAM_DATA_INTERFACE.md)
 6. [FastWAM 三阶段训练](training/FASTWAM_THREE_STAGE.md)
+7. [三模型统一微调](training/THREE_MODEL_TUNING.md)
 
 新增或排查某个数据源：
 
@@ -50,9 +51,10 @@
 | [LingBot-VA / DreamZero](datasets/LINGBOT_VA_DREAMZERO.md) | 两个扩展数据源的 schema、相机、action 和真实样本结果 |
 | [Target Overview](targets/README.md) | source adapter 与模型 target 的边界和 readiness 规则 |
 | [Old LingBot-VA Target](targets/LINGBOT_VA.md) | 30D channel、action_config、quantile stats 和 VAE latent jobs |
-| [DreamZero Target](targets/DREAMZERO.md) | GEAR modality、relative stats、语言和 Hydra patch |
+| [DreamZero Target](targets/DREAMZERO.md) | GEAR modality、relative stats、语言、Hydra profile 和安装校验 |
 | [FastWAM Data Interface](training/FASTWAM_DATA_INTERFACE.md) | `TrainingCaseV1 -> batch -> loss` 的稳定接口合同 |
 | [FastWAM Three-Stage](training/FASTWAM_THREE_STAGE.md) | Stage 1/2/3、memory、参数冻结和 checkpoint 交接 |
+| [Three-Model Tuning](training/THREE_MODEL_TUNING.md) | 同一 source 到 FastWAM、old LingBot-VA、DreamZero 的启动、恢复和收据 |
 
 ## 单一事实来源
 
@@ -66,6 +68,7 @@
 - 模型专用输出合同只维护在 `targets/` 文档和 `configs/targets/`。
 - FastWAM batch/loss 字段只维护在 `training/FASTWAM_DATA_INTERFACE.md`。
 - 三阶段模型结构和 checkpoint 规则只维护在 `training/FASTWAM_THREE_STAGE.md`。
+- 三模型统一 launcher 和跨仓库运行方式只维护在 `training/THREE_MODEL_TUNING.md`。
 
 当实现与文档冲突时，版本化配置和测试是最终依据；文档必须在同一提交中修正。
 

@@ -95,6 +95,12 @@ latents/chunk-000/<camera>/episode_000000_0_450.pth
 Wan2.2 VAE 和 text encoder 必须在 LingBot-VA 模型环境执行。提取完成后运行：
 
 ```bash
+/path/to/lingbot/python scripts/extract_lingbot_va_latents.py \
+  --target-root /data/targets/lingbot_va_dataset \
+  --model-root /models/lingbot-va-base \
+  --lingbot-repo /code/lingbot-va \
+  --device cuda
+
 python3 scripts/prepare_lingbot_va_target.py validate \
   --root /data/targets/lingbot_va_dataset \
   --require-latents \
@@ -102,10 +108,19 @@ python3 scripts/prepare_lingbot_va_target.py validate \
 ```
 
 缺 latent 时 metadata 可以 `valid=true`，但 `ready_for_training` 必须为 `false`。
+统一训练 launcher 也默认检查全部 job；`allow_partial_latents: true` 只用于至少有一个
+完整多视角 segment 的 smoke。
+
+## 训练入口
+
+`scripts/run_lingbot_va_training.py` 使用官方 `LatentLeRobotDataset` 和 Trainer，补齐了单 target
+训练、无 FlashAttention 时的 SDPA import fallback，以及 model/optimizer/scheduler/step 的完整
+checkpoint。统一启动和恢复命令见 [三模型统一微调](../training/THREE_MODEL_TUNING.md)。
 
 ## 当前限制
 
 - 输入必须已经是 LeRobot v2；HDF5/RLDS 到 LeRobot 的视频编码不在该 target 中隐式完成。
 - 本仓库不提交或下载 Wan2.2 权重，也不伪造 latent。
 - 相机 key 顺序直接决定 latent 拼接顺序，修改 profile 后必须重建 receipt 和全部 latent。
-- 训练配置中的 `attn_mode`、模型权重和 FSDP 启动仍由官方 LingBot-VA 仓库管理。
+- 模型结构和损失仍来自官方 LingBot-VA checkout；本仓库只提供可移植 wrapper 和数据合同。
+- 当前实测只提取了自采数据 episode 0 的三个 latent；全量训练前还需完成其余 129 个。

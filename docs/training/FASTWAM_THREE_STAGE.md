@@ -511,8 +511,8 @@ Stage 3 默认学习率比 Stage 2 小：backbone `2e-6`，memory/reference `2e-
   task_info 仍需续传并做全量统计。
 
 单库 memory smoke 配置为 `configs/task/stage2_agibot_memory_smoke.yaml`。数据和 memory
-loader 已验证；当前节点 CUDA/NVML 不可见且 8 张 H200 正被其他训练占用，因此本次没有
-启动新的 5B optimizer step。GPU 可用后执行：
+loader 已验证；当前三模型调试周期已用自采 `take_wrong_item_right_arm` 完成 MemoryFastWAM
+optimizer/checkpoint/resume，但这不替代 AgiBot 单库回归。执行：
 
 ```bash
 export FASTWAM_PREPROCESS_ROOT=/path/to/Process_WM_Data

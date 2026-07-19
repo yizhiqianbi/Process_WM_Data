@@ -155,6 +155,30 @@ class ExternalDatasetPipelineTest(unittest.TestCase):
         self.assertEqual(action_mapping["valid_slots"], [])
         self.assertEqual(action_mapping["candidate_valid_slots"], [14])
 
+    def test_xdof_15d_schema_uses_audited_right_arm_and_camera_mapping(self):
+        features = {
+            "observation.state": {"dtype": "float32", "shape": [15], "names": None},
+            "action": {"dtype": "float32", "shape": [15], "names": None},
+        }
+        for key in (
+            "observation.images.left_eye",
+            "observation.images.right_eye",
+            "observation.images.left_wrist",
+            "observation.images.right_wrist",
+        ):
+            feature_key, feature = _video_feature(key, 28.0)
+            features[feature_key] = feature
+        variant = build_lingbot_variant({"features": features})
+        self.assertEqual(variant["id"], "xdof_right_joint_15d")
+        self.assertEqual(
+            variant["canonical_mapping"]["action"]["valid_slots"],
+            [13, 21, 22, 23, 24, 25, 26, 27],
+        )
+        roles = {camera.source_key: camera.role for camera in variant["cameras"]}
+        self.assertEqual(roles["observation.images.left_eye"], "global_primary")
+        self.assertEqual(roles["observation.images.right_eye"], "left_wrist")
+        self.assertEqual(roles["observation.images.right_wrist"], "right_wrist")
+
     def test_dreamzero_without_modality_cannot_activate_inferred_action(self):
         variant = build_dreamzero_variant(
             {

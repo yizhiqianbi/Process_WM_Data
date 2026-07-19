@@ -1,0 +1,66 @@
+schema_version: wm-tuning-v1
+experiment: take_wrong_item_right_arm
+
+models:
+  fastwam:
+    repo: "${FASTWAM_REPO}"
+    python: "${FASTWAM_PYTHON}"
+    data_root: "${PROCESS_WM_DATA_REPO}"
+    case_manifest: "${FASTWAM_CASE_MANIFEST}"
+    normalization_stats: "${FASTWAM_NORMALIZATION_STATS}"
+    text_embedding_cache_dir: "${FASTWAM_TEXT_CACHE}"
+    diffsynth_model_base: "${FASTWAM_DIFFSYNTH_MODEL_BASE}"
+    stage1_video_checkpoint: "${FASTWAM_STAGE1_VIDEO_CKPT}"
+    action_dit_checkpoint: "${FASTWAM_ACTION_DIT_CKPT}"
+    gpus: "0"
+    phases:
+      stage1_video:
+        task: stage1_video_backbone_smoke
+        allowed_modes: [joint_video_action, video_only]
+        allowed_quality_tiers: [A]
+        include_robot_supervision: false
+        max_samples: 1
+      stage2_memory:
+        task: stage2_memory_fastwam_smoke
+        allowed_modes: [joint_video_action]
+        allowed_quality_tiers: [A]
+        include_robot_supervision: true
+        skip_dit_load_from_pretrain: true
+        max_samples: 1
+      stage3_finetune:
+        task: stage3_robocoin_memory_smoke
+        allowed_modes: [joint_video_action]
+        allowed_quality_tiers: [A]
+        include_robot_supervision: true
+        skip_dit_load_from_pretrain: true
+        initial_checkpoint: "${FASTWAM_STAGE2_MEMORY_CKPT}"
+        max_samples: 1
+
+  lingbot_va:
+    repo: "${LINGBOT_VA_REPO}"
+    python: "${LINGBOT_VA_PYTHON}"
+    dataset_root: "${LINGBOT_VA_TARGET}"
+    model_root: "${LINGBOT_VA_MODEL_ROOT}"
+    gpus: "1"
+    num_gpus: 1
+    workers: 0
+    save_interval: 1
+    gradient_accumulation_steps: 1
+    allow_partial_latents: false
+
+  dreamzero:
+    repo: "${DREAMZERO_REPO}"
+    python: "${DREAMZERO_PYTHON}"
+    dataset_root: "${DREAMZERO_TARGET}"
+    data_profile: dreamzero/xdof_relative
+    wan_model_root: "${DREAMZERO_WAN_MODEL_ROOT}"
+    text_encoder: "${DREAMZERO_TEXT_ENCODER}"
+    image_encoder: "${DREAMZERO_IMAGE_ENCODER}"
+    vae: "${DREAMZERO_VAE}"
+    tokenizer_root: "${DREAMZERO_TOKENIZER_ROOT}"
+    pretrained_model_root: "${DREAMZERO_PRETRAINED_MODEL_ROOT}"
+    gpus: "2"
+    num_gpus: 1
+    learning_rate: 1.0e-5
+    image_width: 320
+    image_height: 176

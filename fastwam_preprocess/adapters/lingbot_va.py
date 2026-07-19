@@ -12,6 +12,12 @@ from .lerobot import camera_records, feature_schemas, scan_lerobot_repo
 LINGBOT_VA_REPOSITORY = "https://github.com/Robbyant/lingbot-va"
 ROBOTWIN_DATASET = "robbyant/robotwin-clean-and-aug-lerobot"
 LIBERO_DATASET = "robbyant/libero-long-lerobot"
+XDOF_CAMERA_KEYS = {
+    "observation.images.left_eye",
+    "observation.images.right_eye",
+    "observation.images.left_wrist",
+    "observation.images.right_wrist",
+}
 
 _POSE_NAMES = (
     "position_x",
@@ -431,6 +437,112 @@ def _libero_variant(
     }
 
 
+def _xdof_joint_variant(
+    cameras: list[CameraRecord],
+    state_schema: dict[str, Any],
+    action_schema: dict[str, Any],
+) -> dict[str, Any] | None:
+    """Match the Tianji/XDOF 15D joint dataset with its audited wiring map."""
+
+    state_key = "observation.state"
+    action_key = "action"
+    if (
+        _feature_width(state_schema, state_key) != 15
+        or _feature_width(action_schema, action_key) != 15
+        or {camera.source_key for camera in cameras} != XDOF_CAMERA_KEYS
+    ):
+        return None
+
+    state_entries = [
+        {
+            "source_key": state_key,
+            "source_index": index,
+            "canonical_index": 21 + index,
+            "semantic": f"right_joint_{index + 1}_state",
+        }
+        for index in range(7)
+    ] + [
+        {
+            "source_key": state_key,
+            "source_index": 14,
+            "canonical_index": 13,
+            "semantic": "right_gripper_state",
+            "alignment_safe": False,
+        }
+    ]
+    action_entries = [
+        {
+            "source_key": action_key,
+            "source_index": index,
+            "canonical_index": 21 + index,
+            "semantic": f"right_joint_{index + 1}_target",
+        }
+        for index in range(7)
+    ] + [
+        {
+            "source_key": action_key,
+            "source_index": 14,
+            "canonical_index": 13,
+            "semantic": "right_gripper_target",
+            "alignment_safe": False,
+        }
+    ]
+    provenance = {
+        "authority": "audited_xdof_take_wrong_item_contract",
+        "source_action_layout": "right_joint_0_6_plus_right_gripper_14",
+        "camera_wiring_note": "recorded names differ from physical camera content",
+    }
+    return {
+        "id": "xdof_right_joint_15d",
+        "robot_type": "tianji_xdof",
+        "embodiment": "tianji_xdof_right_arm",
+        "cameras": _camera_profile(
+            cameras,
+            {
+                # Physical content was audited after collection. Keep these bindings
+                # identical during training and deployment even though cable labels differ.
+                "observation.images.left_eye": "global_primary",
+                "observation.images.right_eye": "left_wrist",
+                "observation.images.right_wrist": "right_wrist",
+                "observation.images.left_wrist": "auxiliary",
+            },
+        ),
+        "state_schema": state_schema,
+        "action_schema": action_schema,
+        "canonical_mapping": {
+            "state": build_verified_mapping(
+                state_schema,
+                kind="state",
+                entries=state_entries,
+                verification_note="XDOF 15D right-arm joint and gripper feedback",
+                provenance=provenance,
+            ),
+            "action": build_verified_mapping(
+                action_schema,
+                kind="action",
+                entries=action_entries,
+                verification_note="XDOF 15D right-arm joint and gripper targets",
+                provenance=provenance,
+            ),
+        },
+        "passed_checks": ["audited_embodiment_schema", "audited_camera_wiring"],
+        "metadata": {
+            "native_conversion": {"source_format": "parquet", "derived_columns": {}},
+            "source_profile": {
+                "family": "xdof_take_wrong_item_right_arm",
+                "native_action_dimension": 15,
+                "active_source_action_indices": [*range(7), 14],
+                "canonical_action_semantics": "absolute_right_joint_and_gripper_target",
+                "camera_content_bindings": {
+                    "head": "observation.images.left_eye",
+                    "left_wrist": "observation.images.right_eye",
+                    "right_wrist": "observation.images.right_wrist",
+                },
+            },
+        },
+    }
+
+
 def build_lingbot_variant(info: dict[str, Any]) -> dict[str, Any]:
     features = info.get("features")
     features = features if isinstance(features, dict) else {}
@@ -442,6 +554,9 @@ def build_lingbot_variant(info: dict[str, Any]) -> dict[str, Any]:
     libero = _libero_variant(cameras, state_schema, action_schema)
     if libero is not None:
         return libero
+    xdof = _xdof_joint_variant(cameras, state_schema, action_schema)
+    if xdof is not None:
+        return xdof
     return {
         "id": "unverified_lerobot_schema",
         "cameras": cameras,

@@ -103,13 +103,14 @@ def _segments(episode: dict[str, Any], length: int, fallback_text: str) -> list[
 def _sample_frame_ids(start: int, end: int, source_fps: float, target_fps: float) -> list[int]:
     if source_fps <= 0 or target_fps <= 0:
         raise TargetPreparationError("source and latent target FPS must be positive")
-    duration = (end - start) / source_fps
-    count = max(1, int(np.floor(duration * target_fps)))
-    values = [
-        min(end - 1, start + int(round(index * source_fps / target_fps)))
-        for index in range(count)
-    ]
-    return list(dict.fromkeys(values))
+    stride = source_fps / target_fps
+    rounded_stride = int(round(stride))
+    if rounded_stride < 1 or not np.isclose(stride, rounded_stride, atol=1e-6):
+        raise TargetPreparationError(
+            "old LingBot-VA requires an integer source-to-latent frame stride; "
+            f"got source_fps={source_fps:g}, target_fps={target_fps:g}"
+        )
+    return list(range(start, end, rounded_stride))
 
 
 def _materialize_compact_actions(
@@ -131,6 +132,11 @@ def _materialize_compact_actions(
         if column_index < 0:
             raise TargetPreparationError(f"missing action column {action_column!r}")
         table = table.set_column(column_index, action_column, action_array)
+        # Old LingBot-VA pins a datasets release that cannot deserialize the
+        # newer Hugging Face ``List`` feature stored in Arrow schema metadata.
+        # The physical Arrow types are sufficient for inference and preserve
+        # every column value, so omit only that optional producer metadata.
+        table = table.replace_schema_metadata(None)
         destination = staging / source.relative_data_path(episode_index)
         destination.parent.mkdir(parents=True, exist_ok=True)
         pq.write_table(table, destination, compression="zstd")
@@ -263,7 +269,12 @@ def prepare_lingbot_va_target(
             frame_ids = _sample_frame_ids(
                 segment["start_frame"], segment["end_frame"], source_fps, latent_fps
             )
-            for camera_key in camera_keys:
+            for camera_index, camera_key in enumerate(camera_keys):
+                target_height = int(profile.get("height") or 256)
+                target_width = int(profile.get("width") or 256)
+                if profile.get("env_type") == "robotwin_tshape" and camera_index > 0:
+                    target_height //= 2
+                    target_width //= 2
                 relative_output = (
                     Path("latents")
                     / f"chunk-{chunk:03d}"
@@ -279,11 +290,17 @@ def prepare_lingbot_va_target(
                         "episode_index": episode_index,
                         "camera_key": camera_key,
                         "source_video": str(source.video_path(episode_index, camera_key)),
+                        "source_video_relative": str(
+                            source.video_path(episode_index, camera_key).relative_to(source.root)
+                        ),
                         "start_frame": segment["start_frame"],
                         "end_frame": segment["end_frame"],
                         "frame_ids": frame_ids,
                         "source_fps": source_fps,
                         "target_fps": latent_fps,
+                        "target_height": target_height,
+                        "target_width": target_width,
+                        "vae_temporal_stride": 4,
                         "text": segment["action_text"],
                         "output": str(relative_output),
                     }

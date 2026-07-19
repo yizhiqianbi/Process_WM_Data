@@ -8,10 +8,15 @@ import unittest
 import numpy as np
 import pyarrow as pa
 import pyarrow.parquet as pq
+import yaml
 
 from fastwam_preprocess.utils import iter_jsonl, read_json
 from targets.common import LeRobotV2Dataset, TargetPreparationError, load_target_profile
-from targets.dreamzero import prepare_dreamzero_target
+from targets.dreamzero import (
+    install_dreamzero_training_profile,
+    prepare_dreamzero_target,
+    validate_dreamzero_target,
+)
 from targets.lingbot_va import prepare_lingbot_va_target, validate_lingbot_va_target
 
 
@@ -38,6 +43,7 @@ def _build_lerobot_fixture(
     cameras: list[str],
     episodes: int = 2,
     length: int = 32,
+    fps: int = 20,
 ) -> None:
     features = {
         "observation.state": {
@@ -57,12 +63,12 @@ def _build_lerobot_fixture(
             "dtype": "video",
             "shape": [3, 16, 16],
             "names": ["channels", "height", "width"],
-            "info": {"video.fps": 20.0, "video.codec": "h264"},
+            "info": {"video.fps": float(fps), "video.codec": "h264"},
         }
     info = {
         "codebase_version": "v2.1",
         "robot_type": "fixture",
-        "fps": 20,
+        "fps": fps,
         "total_episodes": episodes,
         "total_frames": episodes * length,
         "total_tasks": 1,
@@ -99,7 +105,7 @@ def _build_lerobot_fixture(
                 "action": pa.array(
                     action.tolist(), type=pa.list_(pa.float32(), action_width)
                 ),
-                "timestamp": pa.array(np.arange(length) / 20.0, type=pa.float32()),
+                "timestamp": pa.array(np.arange(length) / fps, type=pa.float32()),
                 "episode_index": pa.array([episode_index] * length, type=pa.int64()),
                 "frame_index": pa.array(range(length), type=pa.int64()),
                 "index": pa.array(
@@ -201,7 +207,7 @@ class TargetPreparationTest(unittest.TestCase):
         source = self.root / "custom"
         output = self.root / "custom_lingbot"
         _build_lerobot_fixture(
-            source, action_width=15, state_width=15, cameras=cameras
+            source, action_width=15, state_width=15, cameras=cameras, fps=28
         )
         document, profile = load_target_profile(
             ROOT / "configs" / "targets" / "lingbot_va.yaml",
@@ -219,11 +225,20 @@ class TargetPreparationTest(unittest.TestCase):
         prepared = LeRobotV2Dataset(output)
         self.assertEqual(prepared.read_column(0, "action").shape, (32, 8))
         self.assertEqual(prepared.feature_width("action"), 8)
+        parquet_schema = pq.read_schema(
+            output / "data" / "chunk-000" / "episode_000000.parquet"
+        )
+        self.assertIsNone(parquet_schema.metadata)
         model_profile = read_json(output / "meta" / "lingbot_va_model_profile.json")
         self.assertEqual(
             model_profile["used_action_channel_ids"], [21, 22, 23, 24, 25, 26, 27, 29]
         )
         self.assertFalse((output / "data").is_symlink())
+        jobs = list(iter_jsonl(output / "meta" / "lingbot_va_latent_jobs.jsonl"))
+        self.assertEqual(jobs[0]["target_fps"], 7.0)
+        self.assertEqual(jobs[0]["target_height"], 256)
+        self.assertEqual(jobs[0]["target_width"], 256)
+        self.assertEqual(np.diff(jobs[0]["frame_ids"]).tolist(), [4] * 7)
 
     def test_dreamzero_profile_generates_gear_metadata_and_language(self) -> None:
         cameras = [
@@ -234,7 +249,7 @@ class TargetPreparationTest(unittest.TestCase):
         source = self.root / "custom_dreamzero_source"
         output = self.root / "custom_dreamzero"
         _build_lerobot_fixture(
-            source, action_width=15, state_width=15, cameras=cameras
+            source, action_width=15, state_width=15, cameras=cameras, fps=28
         )
         document, profile = load_target_profile(
             ROOT / "configs" / "targets" / "dreamzero.yaml",
@@ -252,7 +267,9 @@ class TargetPreparationTest(unittest.TestCase):
         )
         self.assertTrue(result["valid"])
         self.assertFalse(result["ready_for_training"])
-        self.assertTrue(result["requires_upstream_profile_registration"])
+        self.assertFalse(result["requires_upstream_profile_registration"])
+        self.assertTrue(result["profile_install_required"])
+        self.assertFalse(result["profile_installed"])
         modality = read_json(output / "meta" / "modality.json")
         self.assertEqual(
             modality["state"]["right_joint_position"]["start"], 0
@@ -270,6 +287,59 @@ class TargetPreparationTest(unittest.TestCase):
             table["annotation.task"][0].as_py(), "move the object to the correct place"
         )
         self.assertTrue((output / "meta" / "dreamzero_hydra_patch.yaml").is_file())
+        training_profile_path = output / "meta" / "dreamzero_training_profile.yaml"
+        training_profile_text = training_profile_path.read_text()
+        self.assertTrue(training_profile_text.startswith("# @package _global_\n"))
+        training_profile = yaml.safe_load(training_profile_text)
+        self.assertEqual(
+            training_profile["modality_config_xdof"]["video"]["modality_keys"],
+            ["video.left_eye", "video.right_wrist", "video.right_eye"],
+        )
+        self.assertEqual(
+            training_profile["relative_action_keys"], ["right_joint_position"]
+        )
+        dreamzero_repo = self.root / "dreamzero"
+        enum_path = (
+            dreamzero_repo
+            / "groot"
+            / "vla"
+            / "data"
+            / "schema"
+            / "embodiment_tags.py"
+        )
+        mapping_path = (
+            dreamzero_repo
+            / "groot"
+            / "vla"
+            / "configs"
+            / "model"
+            / "dreamzero"
+            / "transform"
+            / "base.yaml"
+        )
+        enum_path.parent.mkdir(parents=True)
+        mapping_path.parent.mkdir(parents=True)
+        enum_path.write_text('XDOF = "xdof"\n')
+        mapping_path.write_text("projectors:\n  xdof: fixture\n")
+        install_dreamzero_training_profile(output, dreamzero_repo)
+        installed = validate_dreamzero_target(output)
+        self.assertTrue(installed["ready_for_training"])
+        self.assertTrue(installed["profile_installed"])
+        (
+            dreamzero_repo
+            / "groot"
+            / "vla"
+            / "configs"
+            / "data"
+            / "dreamzero"
+            / "xdof_relative.yaml"
+        ).unlink()
+        stale = validate_dreamzero_target(output)
+        self.assertFalse(stale["ready_for_training"])
+        self.assertEqual(
+            stale["profile_install_failure"],
+            "stale_or_mismatched_profile_install_receipt",
+        )
         self.assertFalse((output / "data").is_symlink())
 
 

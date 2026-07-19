@@ -44,7 +44,7 @@ profiles:
       - observation.images.right_eye
       - observation.images.right_wrist
     num_views: 3
-    latent_fps: 10
+    latent_fps: 7
     height: 256
     width: 256
     frame_chunk_size: 4

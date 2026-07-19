@@ -22,9 +22,10 @@ from fastwam_preprocess.windows import build_window_index
 
 def run_dataset(args: argparse.Namespace, dataset: str) -> dict[str, Any]:
     root = args.output_root / dataset
+    input_root = args.input_roots.get(dataset, DEFAULT_ROOTS[dataset])
     scan_summary = ADAPTERS[dataset](
         AdapterOptions(
-            input_root=DEFAULT_ROOTS[dataset],
+            input_root=input_root,
             output_root=root / "scan",
             release=args.release,
             min_frames=args.num_frames,
@@ -89,6 +90,13 @@ def main(argv: list[str] | None = None) -> None:
     )
     parser.add_argument("--output-root", type=Path, default=PACKAGE_ROOT / "work" / "v1")
     parser.add_argument("--release", default="local")
+    parser.add_argument(
+        "--input-root",
+        action="append",
+        default=[],
+        metavar="DATASET=PATH",
+        help="Override a dataset input root; may be repeated",
+    )
     parser.add_argument("--max-episodes", type=int)
     parser.add_argument("--num-frames", type=int, default=81)
     parser.add_argument("--stride", type=int, default=40)
@@ -105,6 +113,15 @@ def main(argv: list[str] | None = None) -> None:
     parser.add_argument("--train-fraction", type=float, default=0.98)
     parser.add_argument("--validation-fraction", type=float, default=0.01)
     args = parser.parse_args(argv)
+
+    args.input_roots = {}
+    for value in args.input_root:
+        dataset, separator, path = value.partition("=")
+        if not separator or dataset not in ADAPTERS or not path:
+            parser.error(f"invalid --input-root {value!r}; expected DATASET=PATH")
+        if dataset in args.input_roots:
+            parser.error(f"duplicate --input-root for {dataset}")
+        args.input_roots[dataset] = Path(path).expanduser().resolve()
 
     datasets = sorted(ADAPTERS) if "all" in args.datasets else list(dict.fromkeys(args.datasets))
     args.output_root.mkdir(parents=True, exist_ok=True)

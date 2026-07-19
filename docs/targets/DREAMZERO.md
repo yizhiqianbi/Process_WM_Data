@@ -46,6 +46,7 @@ meta/embodiment.json
 meta/stats.json
 meta/relative_stats_dreamzero.json
 meta/dreamzero_hydra_patch.yaml
+meta/dreamzero_training_profile.yaml
 meta/dreamzero_target_receipt.json
 data/
 videos/
@@ -75,15 +76,23 @@ annotation.task              <- episode task
 
 ## Upstream Registration Gate
 
-官方 `droid` profile 已注册，可在 metadata 验证通过后进入训练。新的 `xdof` 或其他 embodiment 仍需把生成 patch 合并到 DreamZero 的：
+自采数据使用上游已有的 `EmbodimentTag.XDOF` 和 projector mapping，只需安装数据专用
+Hydra profile：
 
 ```text
-groot/vla/data/schema/embodiment_tags.py
-groot/vla/configs/data/dreamzero/base_48_wan_fine_aug_relative.yaml
-groot/vla/configs/data/dreamzero/<embodiment>_relative.yaml
+meta/dreamzero_training_profile.yaml
+  -> <dreamzero>/groot/vla/configs/data/dreamzero/xdof_relative.yaml
 ```
 
-合并前 `valid=true` 只表示数据合同正确，`ready_for_training=false`。
+安装器会先检查 enum 和 projector，不修改模型代码：
+
+```bash
+python3 scripts/install_dreamzero_profile.py \
+  --target-root /data/targets/dreamzero_dataset \
+  --dreamzero-repo /code/dreamzero
+```
+
+训练 launcher 在启动前会再检查安装后的 YAML。
 
 验证命令：
 
@@ -99,3 +108,10 @@ python3 scripts/prepare_dreamzero_target.py validate \
 - 自定义 profile 的 Hydra patch 不会自动修改外部 DreamZero checkout。
 - 三相机顺序影响正迁移，不能按文件名猜测角色。
 - 训练权重、DeepSpeed、LoRA 和模型 checkpoint 不属于本数据代码仓库。
+
+## 训练入口
+
+`scripts/run_dreamzero_training.py` 保留官方 Hydra/Trainer 路径，但允许显式指定 checkpoint，并在
+`save_lora_only=true` 时跳过上游额外的 16.5B 全模型导出。`checkpoint-N/` 仍保留 LoRA、
+optimizer、scheduler、RNG 和 Trainer state。命令见
+[三模型统一微调](../training/THREE_MODEL_TUNING.md)。
