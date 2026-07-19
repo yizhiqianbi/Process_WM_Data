@@ -176,6 +176,10 @@ python3 scripts/tune_models.py run --config "$CFG" \
   --output-dir work/tuning/runs/fastwam_stage3 --steps 1 --gpus 0
 ```
 
+天机自采数据的固定单窗口过拟合、memory-aware 想象视频和 GT 三联 demo 使用独立的
+`overfit` phase，详见 [FastWAM 天机单轨迹过拟合](FASTWAM_TIANJI_OVERFIT.md)。它不会复用
+Stage 3 的随机样本评测，也不会每个 step 保存完整 optimizer state。
+
 跨阶段用轻量 `.pt` 初始化；同阶段恢复必须用 `checkpoints/state/step_N`，它包含 optimizer、
 scheduler、sampler 和 RNG。
 

@@ -34,6 +34,8 @@ python3 scripts/tune_models.py dry-run \
 ```
 
 完整流程见 [三模型统一微调](docs/training/THREE_MODEL_TUNING.md)。
+天机自采数据的 FastWAM 单轨迹想象 vs GT 实验见
+[FastWAM 天机单轨迹过拟合](docs/training/FASTWAM_TIANJI_OVERFIT.md)。
 
 ## 安装
 

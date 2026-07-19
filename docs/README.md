@@ -30,6 +30,7 @@
 5. [FastWAM 数据接口](training/FASTWAM_DATA_INTERFACE.md)
 6. [FastWAM 三阶段训练](training/FASTWAM_THREE_STAGE.md)
 7. [三模型统一微调](training/THREE_MODEL_TUNING.md)
+8. [FastWAM 天机单轨迹过拟合](training/FASTWAM_TIANJI_OVERFIT.md)
 
 新增或排查某个数据源：
 
@@ -55,6 +56,7 @@
 | [FastWAM Data Interface](training/FASTWAM_DATA_INTERFACE.md) | `TrainingCaseV1 -> batch -> loss` 的稳定接口合同 |
 | [FastWAM Three-Stage](training/FASTWAM_THREE_STAGE.md) | Stage 1/2/3、memory、参数冻结和 checkpoint 交接 |
 | [Three-Model Tuning](training/THREE_MODEL_TUNING.md) | 同一 source 到 FastWAM、old LingBot-VA、DreamZero 的启动、恢复和收据 |
+| [FastWAM Tianji Overfit](training/FASTWAM_TIANJI_OVERFIT.md) | 固定窗口、memory-aware rollout、想象 vs GT demo 和验收门槛 |
 
 ## 单一事实来源
 
@@ -69,6 +71,7 @@
 - FastWAM batch/loss 字段只维护在 `training/FASTWAM_DATA_INTERFACE.md`。
 - 三阶段模型结构和 checkpoint 规则只维护在 `training/FASTWAM_THREE_STAGE.md`。
 - 三模型统一 launcher 和跨仓库运行方式只维护在 `training/THREE_MODEL_TUNING.md`。
+- 天机单轨迹过拟合样本、超参、demo 和验收门槛只维护在 `training/FASTWAM_TIANJI_OVERFIT.md`。
 
 当实现与文档冲突时，版本化配置和测试是最终依据；文档必须在同一提交中修正。
 

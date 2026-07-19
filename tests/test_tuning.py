@@ -66,6 +66,23 @@ class TuningTest(unittest.TestCase):
                             "include_robot_supervision": True,
                             "skip_dit_load_from_pretrain": True,
                             "initial_checkpoint": str(self.root / "stage2.pt"),
+                        },
+                        "overfit": {
+                            "task": "stage3_robocoin_memory_smoke",
+                            "allowed_modes": ["joint_video_action"],
+                            "include_robot_supervision": True,
+                            "skip_dit_load_from_pretrain": True,
+                            "initial_checkpoint": str(self.root / "stage2.pt"),
+                            "sample_offset": 1,
+                            "max_samples": 1,
+                            "learning_rate": 2e-5,
+                            "reference_learning_rate": 1e-4,
+                            "save_every": 50,
+                            "save_training_state": False,
+                            "eval_every": 50,
+                            "eval_fixed_index": 0,
+                            "eval_at_start": True,
+                            "eval_use_train_dataset": True,
                         }
                     },
                 }
@@ -104,6 +121,61 @@ class TuningTest(unittest.TestCase):
             gpus="3",
         )
         self.assertIn(f"resume={relative_resume.resolve()}", resumed.argv)
+
+    def test_fastwam_overfit_phase_freezes_sample_and_evaluation(self) -> None:
+        model_source = self.repo / "src" / "fastwam" / "models" / "wan22"
+        model_source.mkdir(parents=True)
+        (model_source / "memory_fastwam.py").write_text(
+            "class MemoryFastWAM:\n"
+            "    def infer_joint(self, memory_video_long, memory_video_mid, "
+            "memory_video_short, memory_mask_long, memory_mask_mid, memory_mask_short):\n"
+            "        pass\n"
+            "    def infer(self, memory_video_long, memory_video_mid, memory_video_short, "
+            "memory_mask_long, memory_mask_mid, memory_mask_short):\n"
+            "        pass\n"
+        )
+        trainer_source = self.repo / "src" / "fastwam" / "trainer.py"
+        trainer_source.parent.mkdir(parents=True, exist_ok=True)
+        trainer_source.write_text(
+            "eval_fixed_index = eval_at_start = memory_video_long = True\n"
+        )
+        with patch.dict(os.environ, {"TEST_FASTWAM_REPO": str(self.repo)}):
+            config = load_tuning_config(self._write_config())
+        spec = build_fastwam_command(
+            config,
+            phase="overfit",
+            output_dir=self.root / "overfit-run",
+            steps=300,
+            resume=None,
+            gpus="7",
+        )
+
+        self.assertIn("max_steps=300", spec.argv)
+        self.assertIn("data.train.sample_offset=1", spec.argv)
+        self.assertIn("data.train.max_samples=1", spec.argv)
+        self.assertIn("eval_fixed_index=0", spec.argv)
+        self.assertIn("eval_at_start=true", spec.argv)
+        self.assertIn("eval_use_train_dataset=true", spec.argv)
+        self.assertIn("eval_every=50", spec.argv)
+        self.assertIn("eval_seed=42", spec.argv)
+        self.assertIn("save_every=50", spec.argv)
+        self.assertIn("save_training_state=false", spec.argv)
+        self.assertIn("learning_rate=2e-05", spec.argv)
+        self.assertIn("reference_learning_rate=0.0001", spec.argv)
+
+    def test_fastwam_overfit_rejects_runtime_without_memory_joint_inference(self) -> None:
+        with patch.dict(os.environ, {"TEST_FASTWAM_REPO": str(self.repo)}):
+            config = load_tuning_config(self._write_config())
+
+        with self.assertRaisesRegex(TuningConfigError, "custom MemoryFastWAM"):
+            build_fastwam_command(
+                config,
+                phase="overfit",
+                output_dir=self.root / "overfit-run",
+                steps=10,
+                resume=None,
+                gpus="0",
+            )
 
     def test_lingbot_builder_requires_complete_latents_unless_smoke_is_explicit(self) -> None:
         repo = self.root / "lingbot-va"
