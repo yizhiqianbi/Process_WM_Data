@@ -170,6 +170,16 @@ def build_fastwam_command(
         argv.append(
             f"data.train.split={hydra_list([str(value) for value in selected_splits])}"
         )
+    if "camera_roles" in phase_cfg:
+        camera_roles = [str(value) for value in phase_cfg["camera_roles"]]
+        if camera_roles not in (
+            ["global_primary", "left_wrist", "right_wrist"],
+            ["global_primary", "global_secondary", "left_wrist", "right_wrist"],
+        ):
+            raise TuningConfigError(
+                "FastWAM camera_roles must be the canonical three-camera or four-camera layout."
+            )
+        argv.append(f"++data.train.camera_roles={hydra_list(camera_roles)}")
     rectification = phase_cfg.get("camera_rectification_config") or model.get(
         "camera_rectification_config"
     )

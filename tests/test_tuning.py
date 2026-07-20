@@ -95,6 +95,12 @@ class TuningTest(unittest.TestCase):
                             "allowed_modes": ["joint_video_action", "video_only"],
                             "allowed_quality_tiers": ["A"],
                             "splits": ["train", "validation"],
+                            "camera_roles": [
+                                "global_primary",
+                                "global_secondary",
+                                "left_wrist",
+                                "right_wrist",
+                            ],
                             "include_robot_supervision": True,
                             "skip_dit_load_from_pretrain": True,
                             "initial_checkpoint": str(self.root / "stage2.pt"),
@@ -186,6 +192,20 @@ class TuningTest(unittest.TestCase):
         self.assertEqual(profile["virtual_camera"]["horizontal_fov_degrees"], 90.0)
         self.assertEqual(len(payload["bindings"]["source_key"]), 4)
         self.assertEqual(payload["unmatched_policy"], "error")
+
+    def test_tianji_measured_rational_rectification_uses_per_camera_calibrations(self) -> None:
+        path = PROJECT_ROOT / "configs" / "cameras" / "tianji_xdof_measured_rational_v1.json"
+        payload = json.loads(path.read_text(encoding="utf-8"))
+
+        self.assertEqual(payload["provenance"]["resize_scale_xy"], [0.375, 0.375])
+        self.assertEqual(payload["provenance"]["distortion_model"], "OpenCV pinhole rational [k1,k2,p1,p2,k3,k4,k5,k6]")
+        self.assertEqual(len(payload["profiles"]), 4)
+        self.assertEqual(len(payload["bindings"]["source_key"]), 4)
+        for profile in payload["profiles"].values():
+            self.assertEqual(profile["model"], "opencv_pinhole_rational")
+            self.assertEqual(profile["image_size"], [744, 960])
+            self.assertEqual(len(profile["distortion_coefficients"]), 8)
+            self.assertEqual(profile["virtual_camera"]["horizontal_fov_degrees"], 90.0)
 
     def test_fastwam_builder_rejects_duplicate_gpu_ids(self) -> None:
         with patch.dict(os.environ, {"TEST_FASTWAM_REPO": str(self.repo)}):
@@ -291,6 +311,10 @@ class TuningTest(unittest.TestCase):
         self.assertIn("++data.train.sample_offset=0", spec.argv)
         self.assertIn("++data.train.max_samples_per_case=3", spec.argv)
         self.assertIn("data.train.split=[train,validation]", spec.argv)
+        self.assertIn(
+            "++data.train.camera_roles=[global_primary,global_secondary,left_wrist,right_wrist]",
+            spec.argv,
+        )
         self.assertIn(
             f"++data.train.camera_rectification_config={self.rectification.resolve()}",
             spec.argv,

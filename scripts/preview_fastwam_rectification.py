@@ -69,6 +69,8 @@ def main() -> None:
         "include_robot_supervision": bool(phase.get("include_robot_supervision", True)),
         "max_samples": phase.get("max_samples"),
     }
+    if "camera_roles" in phase:
+        common["camera_roles"] = [str(role) for role in phase["camera_roles"]]
     raw_dataset = TrainingCaseDataset(**common)
     rectification = phase.get("camera_rectification_config") or model.get(
         "camera_rectification_config"

@@ -12,18 +12,20 @@ from tuning.fastwam_camera_views import (
 
 def test_camera_panels_cover_expected_training_layout_without_overlap():
     frame = np.zeros((384, 320, 3), dtype=np.uint8)
-    frame[:256] = 10
-    frame[256:, :160] = 20
-    frame[256:, 160:] = 30
+    frame[:192, :160] = 10
+    frame[:192, 160:] = 20
+    frame[192:, :160] = 30
+    frame[192:, 160:] = 40
 
     crops = [crop_camera_panel(frame, panel) for panel in CAMERA_PANELS]
 
     assert [crop.shape for crop in crops] == [
-        (256, 320, 3),
-        (128, 160, 3),
-        (128, 160, 3),
+        (192, 160, 3),
+        (192, 160, 3),
+        (192, 160, 3),
+        (192, 160, 3),
     ]
-    assert [int(crop[0, 0, 0]) for crop in crops] == [10, 20, 30]
+    assert [int(crop[0, 0, 0]) for crop in crops] == [10, 20, 30, 40]
 
 
 def test_camera_pair_has_stable_dimensions_for_global_and_wrist_panels():

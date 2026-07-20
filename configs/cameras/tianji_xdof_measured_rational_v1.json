@@ -1,0 +1,57 @@
+{
+  "schema_version": "fastwam-camera-rectification-v1",
+  "description": "Per-camera Tianji XDOF calibration rectified to a shared 90-degree virtual pinhole camera. K is scaled from the native 2560x1984 calibration images to the decoded 960x744 dataset frames by 3/8; distortion remains in normalized camera coordinates.",
+  "provenance": {
+    "source_document": "tianji.txt",
+    "calibration_image_pixels": [2560, 1984],
+    "dataset_pixels": [960, 744],
+    "resize_scale_xy": [0.375, 0.375],
+    "distortion_model": "OpenCV pinhole rational [k1,k2,p1,p2,k3,k4,k5,k6]",
+    "virtual_camera": "shared pinhole, horizontal FOV 90 degrees"
+  },
+  "profiles": {
+    "tianji_left_eye_h130m_i03160518": {
+      "model": "opencv_pinhole_rational",
+      "calibration_status": "measured_per_camera",
+      "image_size": [744, 960],
+      "camera_matrix": [[365.2434179860125, 0.0, 484.7762975125875], [0.0, 365.3161017081375, 371.7950381747625], [0.0, 0.0, 1.0]],
+      "distortion_coefficients": [0.7565748021, 0.3488354687, 0.0001089934, -0.0001078989, 0.0089876578, 0.8527362413, 0.4965848315, 0.0578912589],
+      "virtual_camera": {"projection": "pinhole", "horizontal_fov_degrees": 90.0}
+    },
+    "tianji_right_eye_h130m_i03160502": {
+      "model": "opencv_pinhole_rational",
+      "calibration_status": "measured_per_camera",
+      "image_size": [744, 960],
+      "camera_matrix": [[364.1533997399625, 0.0, 476.6466666168375], [0.0, 364.170816870525, 373.0105134835125], [0.0, 0.0, 1.0]],
+      "distortion_coefficients": [0.7502349009, 0.3248093597, 0.00000125, -0.0000210533, 0.0079293421, 0.8469055629, 0.4724447258, 0.0524623068],
+      "virtual_camera": {"projection": "pinhole", "horizontal_fov_degrees": 90.0}
+    },
+    "tianji_left_hand_h130m_i03300523": {
+      "model": "opencv_pinhole_rational",
+      "calibration_status": "measured_per_camera",
+      "image_size": [744, 960],
+      "camera_matrix": [[364.209050345775, 0.0, 476.844616484325], [0.0, 364.0973491185375, 378.6541088877625], [0.0, 0.0, 1.0]],
+      "distortion_coefficients": [0.7795499279, 0.2730858611, 0.0001300292, -0.000084421, 0.0055125489, 0.8742988856, 0.4281420988, 0.0404470047],
+      "virtual_camera": {"projection": "pinhole", "horizontal_fov_degrees": 90.0}
+    },
+    "tianji_right_hand_h130m_i03300534": {
+      "model": "opencv_pinhole_rational",
+      "calibration_status": "measured_per_camera",
+      "image_size": [744, 960],
+      "camera_matrix": [[364.3740213765375, 0.0, 477.983398797675], [0.0, 364.4444508570375, 370.50599105555], [0.0, 0.0, 1.0]],
+      "distortion_coefficients": [0.7814000478, 0.2692024767, 0.0001401975, -0.0000979187, 0.0054402354, 0.8758675499, 0.4241401106, 0.0397720982],
+      "virtual_camera": {"projection": "pinhole", "horizontal_fov_degrees": 90.0}
+    }
+  },
+  "bindings": {
+    "source_key": {
+      "observation.images.left_eye": "tianji_left_eye_h130m_i03160518",
+      "observation.images.right_eye": "tianji_right_eye_h130m_i03160502",
+      "observation.images.left_wrist": "tianji_left_hand_h130m_i03300523",
+      "observation.images.right_wrist": "tianji_right_hand_h130m_i03300534"
+    },
+    "role": {}
+  },
+  "default_profile": null,
+  "unmatched_policy": "error"
+}

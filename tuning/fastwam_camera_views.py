@@ -27,20 +27,26 @@ CAMERA_PANELS = (
     CameraPanel(
         role="global_primary",
         source_key="observation.images.left_eye",
-        content="global/head view",
-        box=(0, 0, 320, 256),
+        content="primary global/head view",
+        box=(0, 0, 160, 192),
+    ),
+    CameraPanel(
+        role="global_secondary",
+        source_key="observation.images.left_wrist",
+        content="secondary global view",
+        box=(160, 0, 320, 192),
     ),
     CameraPanel(
         role="left_wrist",
         source_key="observation.images.right_eye",
         content="left wrist view",
-        box=(0, 256, 160, 384),
+        box=(0, 192, 160, 384),
     ),
     CameraPanel(
         role="right_wrist",
         source_key="observation.images.right_wrist",
         content="right wrist view",
-        box=(160, 256, 320, 384),
+        box=(160, 192, 320, 384),
     ),
 )
 
