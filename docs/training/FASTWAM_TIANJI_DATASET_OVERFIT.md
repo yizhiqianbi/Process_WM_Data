@@ -322,12 +322,27 @@ Stage-2 初始化的 8-probe step-0 均值为：
 跨 rank 参数探针最大差异为零，证明真实 DDP backward、梯度同步、optimizer 和 pair 编码链路
 均可执行。
 
-正式 1,250-global-step / 10,000-sample-slot run 输出目录为：
+第一段 1,250-global-step / 10,000-sample-slot run 输出目录为：
 
 ```text
 work/tuning/runs/fastwam_tianji_dataset_overfit
 ```
 
-启动日志为 `work/tuning/launch_logs/fastwam_tianji_dataset_overfit_8gpu_1250.log`。smoke 结果只
-建立 step-0 基线和可执行性，不计作收敛证据。正式结果必须在同一 8-probe suite 上比较 step
-250、500、750、1,000、1,250。
+启动日志为 `work/tuning/launch_logs/fastwam_tianji_dataset_overfit_8gpu_1250.log`。该 run 已
+完成；随后从 `step_001250.pt` 继续训练 1,250 steps，累计达到 2,500 steps：
+
+```text
+work/tuning/runs/fastwam_tianji_dataset_overfit_cont_1250_to_2500
+```
+
+两个阶段都在同一组 8 个固定 probe 上执行 step 0/250/500/750/1,000/1,250 suite。关键结果为：
+
+| 累计 step | val loss | PSNR | SSIM | action L1 | action MSE | memory valid |
+|---:|---:|---:|---:|---:|---:|---:|
+| 0 | 0.85796 | 11.19127 dB | 0.18891 | 0.35885 | 0.25942 | 1.0 |
+| 1,250 | 0.03850 | 18.97279 dB | 0.77829 | 0.05287 | 0.00572 | 1.0 |
+| 2,500 | 0.02562 | 19.18139 dB | 0.78697 | 0.04041 | 0.00310 | 1.0 |
+
+累计 step 2,000 的 val loss 最低，为 `0.01884`；最终点的 SSIM 和 action 指标优于第一阶段
+终点。所有 suite 的三个相机都保持原始鱼眼域，rectification mask 为
+`[false,false,false]`，没有把校正图和原始图混入同一训练分布。

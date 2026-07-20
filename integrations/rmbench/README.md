@@ -14,7 +14,7 @@ The patch is pinned to official RMBench commit:
 Patch SHA-256:
 
 ```text
-f09b67fea4b732795f9d1579a8ebdd51db4a341679367d575900f078765f755e
+c11a1c770eef27d271fc457e11e75c526ae5fc5dc8681dc9b72e65d896ac567f
 ```
 
 It adds the following runtime contracts:
@@ -28,6 +28,14 @@ It adds the following runtime contracts:
 - Resume support for the official expert-feasible seed scan.
 - A bounded consecutive setup-error gate so dependency failures cannot be
   silently counted as policy failures.
+- Explicit torch intra-op/inter-op limits before importing the simulator or
+  model-server dependency graph.
+- A host-level file lock around each complete SAPIEN observation-rendering
+  transaction, preventing concurrent lavapipe `get_picture` native crashes
+  while preserving multi-GPU model execution.
+- An evaluation-only switch to omit unused camera calibration matrices from
+  each observation, reducing unstable Mesa/SAPIEN native calls without changing
+  RGB, qpos, action, or camera-layout model inputs.
 
 Apply it to a clean checkout:
 

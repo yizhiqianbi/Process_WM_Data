@@ -32,6 +32,7 @@
 7. [三模型统一微调](training/THREE_MODEL_TUNING.md)
 8. [FastWAM 天机单轨迹过拟合](training/FASTWAM_TIANJI_OVERFIT.md)
 9. [FastWAM 天机全数据原始鱼眼域过拟合](training/FASTWAM_TIANJI_DATASET_OVERFIT.md)
+10. [RMBench Helios MemoryFastWAM](training/RMBENCH_HELIOS.md)
 
 新增或排查某个数据源：
 
@@ -59,6 +60,7 @@
 | [Three-Model Tuning](training/THREE_MODEL_TUNING.md) | 同一 source 到 FastWAM、old LingBot-VA、DreamZero 的启动、恢复和收据 |
 | [FastWAM Tianji Overfit](training/FASTWAM_TIANJI_OVERFIT.md) | 固定窗口、memory-aware rollout、想象 vs GT demo 和验收门槛 |
 | [FastWAM Tianji Dataset Overfit](training/FASTWAM_TIANJI_DATASET_OVERFIT.md) | 44 条轨迹、原始鱼眼域、跨 episode probe 和 inference/GT pair demo |
+| [RMBench Helios MemoryFastWAM](training/RMBENCH_HELIOS.md) | 官方九任务数据合同、8/2/1 memory、任务微调和 100-rollout 闭环评测 |
 
 ## 单一事实来源
 

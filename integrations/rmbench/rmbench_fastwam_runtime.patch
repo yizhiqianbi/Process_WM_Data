@@ -1,8 +1,46 @@
 diff --git a/envs/_base_task.py b/envs/_base_task.py
-index e0ea0d8..16b482f 100644
+index e0ea0d8..4bea7ed 100644
 --- a/envs/_base_task.py
 +++ b/envs/_base_task.py
-@@ -217,10 +217,20 @@ class Base_Task(gym.Env):
+@@ -1,4 +1,5 @@
+ import os
++import fcntl
+ import re
+ import sapien.core as sapien
+ from sapien.render import clear_cache as sapien_clear_cache
+@@ -10,6 +11,7 @@ import toppra as ta
+ import json
+ import transforms3d as t3d
+ from collections import OrderedDict
++from contextlib import contextmanager
+ import torch, random
+ 
+ from .utils import *
+@@ -33,6 +35,23 @@ current_file_path = os.path.abspath(__file__)
+ parent_directory = os.path.dirname(current_file_path)
+ 
+ 
++@contextmanager
++def _renderer_process_lock():
++    lock_value = os.environ.get("RMBENCH_RENDER_LOCK_PATH", "").strip()
++    if not lock_value:
++        yield
++        return
++
++    lock_path = Path(lock_value).expanduser()
++    lock_path.parent.mkdir(parents=True, exist_ok=True)
++    with lock_path.open("a+", encoding="utf-8") as lock_handle:
++        fcntl.flock(lock_handle.fileno(), fcntl.LOCK_EX)
++        try:
++            yield
++        finally:
++            fcntl.flock(lock_handle.fileno(), fcntl.LOCK_UN)
++
++
+ class Base_Task(gym.Env):
+ 
+     def __init__(self):
+@@ -217,10 +236,20 @@ class Base_Task(gym.Env):
          # give renderer to sapien sim
          self.engine.set_renderer(self.renderer)
  
@@ -27,6 +65,87 @@ index e0ea0d8..16b482f 100644
  
          # declare sapien scene
          scene_config = sapien.SceneConfig()
+@@ -446,6 +475,10 @@ class Base_Task(gym.Env):
+     # =========================================================== Basic APIs ===========================================================
+ 
+     def get_obs(self):
++        with _renderer_process_lock():
++            return self._get_obs_with_renderer_lock()
++
++    def _get_obs_with_renderer_lock(self):
+         self._update_render()
+         self.cameras.update_picture()
+         pkl_dic = {
+@@ -455,12 +488,26 @@ class Base_Task(gym.Env):
+             "endpose": {},
+         }
+ 
+-        pkl_dic["observation"] = self.cameras.get_config()
++        skip_camera_config = os.environ.get(
++            "RMBENCH_SKIP_CAMERA_CONFIG", "0"
++        ).strip().lower()
++        if skip_camera_config not in {"0", "1", "false", "true", "no", "yes"}:
++            raise ValueError(
++                "RMBENCH_SKIP_CAMERA_CONFIG must be a boolean value, got "
++                f"{skip_camera_config!r}"
++            )
++        pkl_dic["observation"] = (
++            {}
++            if skip_camera_config in {"1", "true", "yes"}
++            else self.cameras.get_config()
++        )
+         # rgb
+         if self.data_type.get("rgb", False):
+             rgb = self.cameras.get_rgb()
+             for camera_name in rgb.keys():
+-                pkl_dic["observation"][camera_name].update(rgb[camera_name])
++                pkl_dic["observation"].setdefault(camera_name, {}).update(
++                    rgb[camera_name]
++                )
+ 
+         if self.data_type.get("third_view", False):
+             third_view_rgb = self.cameras.get_third_view_rgb()
+@@ -469,17 +516,23 @@ class Base_Task(gym.Env):
+         if self.data_type.get("mesh_segmentation", False):
+             mesh_segmentation = self.cameras.get_segmentation(level="mesh")
+             for camera_name in mesh_segmentation.keys():
+-                pkl_dic["observation"][camera_name].update(mesh_segmentation[camera_name])
++                pkl_dic["observation"].setdefault(camera_name, {}).update(
++                    mesh_segmentation[camera_name]
++                )
+         # actor_segmentation
+         if self.data_type.get("actor_segmentation", False):
+             actor_segmentation = self.cameras.get_segmentation(level="actor")
+             for camera_name in actor_segmentation.keys():
+-                pkl_dic["observation"][camera_name].update(actor_segmentation[camera_name])
++                pkl_dic["observation"].setdefault(camera_name, {}).update(
++                    actor_segmentation[camera_name]
++                )
+         # depth
+         if self.data_type.get("depth", False):
+             depth = self.cameras.get_depth()
+             for camera_name in depth.keys():
+-                pkl_dic["observation"][camera_name].update(depth[camera_name])
++                pkl_dic["observation"].setdefault(camera_name, {}).update(
++                    depth[camera_name]
++                )
+         # endpose
+         if self.data_type.get("endpose", False):
+             if not self.is_dual_arm:
+@@ -520,9 +573,10 @@ class Base_Task(gym.Env):
+         return pkl_dic
+ 
+     def save_camera_rgb(self, save_path, camera_name='head_camera'):
+-        self._update_render()
+-        self.cameras.update_picture()
+-        rgb = self.cameras.get_rgb()
++        with _renderer_process_lock():
++            self._update_render()
++            self.cameras.update_picture()
++            rgb = self.cameras.get_rgb()
+         save_img(save_path, rgb[camera_name]['rgb'])
+ 
+     def _take_picture(self):  # save data
 diff --git a/envs/robot/robot.py b/envs/robot/robot.py
 index fef2344..5bd25cc 100644
 --- a/envs/robot/robot.py
@@ -55,10 +174,34 @@ index fef2344..5bd25cc 100644
          if not self.communication_flag:
              self.left_planner = CuroboPlanner(self.left_entity_origion_pose,
 diff --git a/script/eval_policy_client.py b/script/eval_policy_client.py
-index 22e418a..0326972 100644
+index 22e418a..2c7ffd4 100644
 --- a/script/eval_policy_client.py
 +++ b/script/eval_policy_client.py
-@@ -50,6 +50,43 @@ import json
+@@ -2,6 +2,23 @@ import sys
+ import os
+ import subprocess
+ 
++
++def _configure_torch_threads():
++    intraop = int(os.environ.get("RMBENCH_TORCH_NUM_THREADS", "1"))
++    interop = int(os.environ.get("RMBENCH_TORCH_INTEROP_THREADS", "1"))
++    if intraop <= 0 or interop <= 0:
++        raise ValueError("RMBENCH torch thread limits must be positive")
++    os.environ.setdefault("OMP_NUM_THREADS", str(intraop))
++    os.environ.setdefault("MKL_NUM_THREADS", str(intraop))
++    import torch
++
++    torch.set_num_threads(intraop)
++    torch.set_num_interop_threads(interop)
++    print(f"RMBench torch threads: intraop={intraop}, interop={interop}")
++
++
++_configure_torch_threads()
++
+ sys.path.append("./")
+ sys.path.append(f"./policy")
+ sys.path.append("./description/utils")
+@@ -50,6 +67,43 @@ import json
  from typing import Any
  import base64
  
@@ -82,7 +225,7 @@ index 22e418a..0326972 100644
 +        return
 +    path.parent.mkdir(parents=True, exist_ok=True)
 +    payload = {
-+        "schema_version": "rmbench-evaluation-progress-v1",
++        "schema_version": "rmbench-evaluation-progress-v2",
 +        "identity": identity,
 +        "status": status,
 +        "next_seed": int(next_seed),
@@ -102,7 +245,7 @@ index 22e418a..0326972 100644
  class NumpyEncoder(json.JSONEncoder):
      """Enhanced json encoder for numpy types with array reconstruction info"""
      def default(self, obj):
-@@ -131,7 +168,7 @@ def get_embodiment_config(robot_file):
+@@ -131,7 +185,7 @@ def get_embodiment_config(robot_file):
      return embodiment_args
  
  class ModelClient:
@@ -111,7 +254,7 @@ index 22e418a..0326972 100644
          self.host = host
          self.port = port
          self.timeout = timeout
-@@ -326,7 +363,19 @@ def main(usr_args):
+@@ -326,7 +380,38 @@ def main(usr_args):
  
      st_seed = 100000 * (1 + seed)
      suc_nums = []
@@ -128,11 +271,30 @@ index 22e418a..0326972 100644
 +        "instruction_type": instruction_type,
 +        "seed": int(seed),
 +        "target_rollouts": test_num,
++        "protocol": {
++            "observation_stride_actions": int(
++                os.environ.get("RMBENCH_OBSERVATION_STRIDE", "4")
++            ),
++            "camera_config_in_observation": os.environ.get(
++                "RMBENCH_SKIP_CAMERA_CONFIG", "0"
++            ).strip().lower()
++            not in {"1", "true", "yes"},
++            "renderer": {
++                "shader": os.environ.get("RMBENCH_RENDER_SHADER", "rt"),
++                "samples_per_pixel": int(
++                    os.environ.get("RMBENCH_RT_SAMPLES", "32")
++                ),
++                "path_depth": int(
++                    os.environ.get("RMBENCH_RT_PATH_DEPTH", "8")
++                ),
++                "denoiser": os.environ.get("RMBENCH_RT_DENOISER", "none"),
++            },
++        },
 +    }
      topk = 1
  
      # model = get_model(usr_args)
-@@ -339,7 +388,9 @@ def main(usr_args):
+@@ -339,7 +424,9 @@ def main(usr_args):
                                     test_num=test_num,
                                     video_size=video_size,
                                     instruction_type=instruction_type,
@@ -143,7 +305,7 @@ index 22e418a..0326972 100644
      suc_nums.append(suc_num)
  
      topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
-@@ -363,7 +414,9 @@ def eval_policy(task_name,
+@@ -363,7 +450,9 @@ def eval_policy(task_name,
                  test_num=100,
                  video_size=None,
                  instruction_type=None,
@@ -154,7 +316,7 @@ index 22e418a..0326972 100644
      print(f"\033[34mTask Name: {args['task_name']}\033[0m")
      print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
  
-@@ -381,9 +434,26 @@ def eval_policy(task_name,
+@@ -381,9 +470,26 @@ def eval_policy(task_name,
      now_seed = st_seed
      task_total_reward = 0
      clear_cache_freq = args["clear_cache_freq"]
@@ -181,7 +343,7 @@ index 22e418a..0326972 100644
      while succ_seed < test_num:
          render_freq = args["render_freq"]
          args["render_freq"] = 0
-@@ -393,6 +463,7 @@ def eval_policy(task_name,
+@@ -393,6 +499,7 @@ def eval_policy(task_name,
                  TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
                  episode_info = TASK_ENV.play_once()
                  TASK_ENV.close_env()
@@ -189,7 +351,7 @@ index 22e418a..0326972 100644
              except UnStableError as e:
                  print(" -------------")
                  print("Error: ", e)
-@@ -402,6 +473,7 @@ def eval_policy(task_name,
+@@ -402,6 +509,7 @@ def eval_policy(task_name,
                  args["render_freq"] = render_freq
                  continue
              except Exception as e:
@@ -197,7 +359,7 @@ index 22e418a..0326972 100644
                  stack_trace = traceback.format_exc()
                  print(" -------------")
                  print("Error: ", stack_trace)
-@@ -409,7 +481,14 @@ def eval_policy(task_name,
+@@ -409,7 +517,14 @@ def eval_policy(task_name,
                  TASK_ENV.close_env()
                  now_seed += 1
                  args["render_freq"] = render_freq
@@ -213,7 +375,7 @@ index 22e418a..0326972 100644
                  continue
  
          if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
-@@ -489,6 +568,16 @@ def eval_policy(task_name,
+@@ -489,6 +604,16 @@ def eval_policy(task_name,
          )
          # TASK_ENV._take_picture()
          now_seed += 1
@@ -231,10 +393,35 @@ index 22e418a..0326972 100644
      return now_seed, TASK_ENV.suc
  
 diff --git a/script/policy_model_server.py b/script/policy_model_server.py
-index bf4be63..0669c46 100644
+index bf4be63..cb002a8 100644
 --- a/script/policy_model_server.py
 +++ b/script/policy_model_server.py
-@@ -17,7 +17,6 @@ from collections import deque
+@@ -1,6 +1,24 @@
+ import sys
+ import os
+ import subprocess
++
++
++def _configure_torch_threads():
++    intraop = int(os.environ.get("RMBENCH_TORCH_NUM_THREADS", "1"))
++    interop = int(os.environ.get("RMBENCH_TORCH_INTEROP_THREADS", "1"))
++    if intraop <= 0 or interop <= 0:
++        raise ValueError("RMBENCH torch thread limits must be positive")
++    os.environ.setdefault("OMP_NUM_THREADS", str(intraop))
++    os.environ.setdefault("MKL_NUM_THREADS", str(intraop))
++    import torch
++
++    torch.set_num_threads(intraop)
++    torch.set_num_interop_threads(interop)
++    print(f"RMBench torch threads: intraop={intraop}, interop={interop}")
++
++
++_configure_torch_threads()
++
+ import socket
+ import json
+ import threading
+@@ -17,7 +35,6 @@ from collections import deque
  sys.path.append("./")
  sys.path.append(f"./policy")
  sys.path.append("./description/utils")

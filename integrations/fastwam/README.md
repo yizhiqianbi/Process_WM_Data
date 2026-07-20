@@ -10,7 +10,7 @@ It contains no model weights, datasets, caches, or credentials.
 Current patch SHA256:
 
 ```text
-abf45b9f55b86bdd4c244247afa505d2c549678055c33568550d31c23aad4fa0
+fc7efc48a4da4265c745e3617fa439965b5e48b8a0d048a7f62c7047e6930e1d
 ```
 
 The patch is pinned to upstream FastWAM commit:
@@ -38,11 +38,13 @@ cd /path/to/FastWAM
 python -m pytest -q
 ```
 
-The connected and clean-patch checkout result is 41 passed tests. The suite includes the inference contract that
+The connected checkout result is 45 passed tests. The suite includes the inference contract that
 keeps canonical padded action dimensions zero throughout flow-matching denoising, optional
 fisheye-to-pinhole mapping, synchronized imagination/GT pair dimensions, DDP-safe wrapped model
 forward, complete ordered merging of rank-sharded fixed probes, and RMBench data/memory/result
-contracts. RMBench simulator-side changes are a separate pinned patch under
+contracts, stride-aligned GT observation refresh, bounded evaluator retry, CPU thread-pool
+limits and renderer isolation. RMBench
+simulator-side changes are a separate pinned patch under
 [`integrations/rmbench/`](../rmbench/README.md).
 
 `scripts/export_fastwam_integration_patch.sh` regenerates the patch from the maintained local

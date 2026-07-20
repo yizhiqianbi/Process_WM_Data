@@ -135,6 +135,16 @@ samples_per_episode: 48   # 44 * 48 / 8 GPU / 24 = 11 个整 batch
 轨迹复制。8 张 H200 上 `batch_size=24/GPU` 的稳定实测峰值为 103.03 GiB allocated、
 120.25 GiB reserved；`batch_size=32` 不保留足够 allocator 余量。
 
+全量 overfit 已完成 250/250 steps，global batch 为 192；step 125 和 250 均保存完整模型与
+optimizer/scheduler/RNG 训练状态。最终日志为 latent loss `0.0646`、action loss `0.0031`，运行
+receipt 状态为 `succeeded`。checkpoint 位于：
+
+```text
+work/tuning/runs/lingbot_va_tianji_full_overfit_batch24_8gpu/checkpoints/
+  checkpoint_step_125/
+  checkpoint_step_250/
+```
+
 ## Observation-conditioned GT Pair 推理
 
 `scripts/run_lingbot_va_pair_inference.py` 用于 overfit 后的多 case 可视化评测。默认的

@@ -3547,10 +3547,10 @@ index 0000000..302a0ce
 +  enabled: false
 diff --git a/docs/RMBENCH_HELIOS.md b/docs/RMBENCH_HELIOS.md
 new file mode 100644
-index 0000000..0fa169a
+index 0000000..dc4f42a
 --- /dev/null
 +++ b/docs/RMBENCH_HELIOS.md
-@@ -0,0 +1,152 @@
+@@ -0,0 +1,162 @@
 +# RMBench Helios MemoryFastWAM
 +
 +This integration trains the local Helios-style FastWAM memory architecture directly from the official RMBench `demo_clean` HDF5 files and evaluates it with the official closed-loop simulator protocol.
@@ -3637,11 +3637,13 @@ index 0000000..0fa169a
 +
 +## Closed-Loop Memory
 +
-+At evaluation, the current simulator observation is the FastWAM `input_image`. The server stores the preceding 11 real simulator observations and passes `history + current` to `MemoryFastWAM.infer_action`; the model's memory selector excludes the current frame. Generated video latents are never fed back as observations.
++At evaluation, the current simulator observation is the FastWAM `input_image`. The server stores the preceding 11 real simulator observations and passes `history + current` to `MemoryFastWAM.infer_action`; the model's memory selector excludes the current frame. Generated video latents are never fed back as observations. For an eight-action execution chunk, GT observations are refreshed after action 4 and at the next replan after action 8. This matches the training video's four-control-step stride instead of rendering an unnecessary observation after every action.
 +
 +The policy predicts canonical 80D actions, applies the canonical invalid-dimension mask during diffusion, denormalizes with task-specific stats, and maps the 14 active values back to RMBench qpos order. It executes eight actions before replanning.
 +
 +The simulator and model run in separate environments because RMBench pins PyTorch 2.4.1 while FastWAM uses PyTorch 2.7.1. The H200 compute devices on this node do not expose Vulkan graphics queues to SAPIEN. `eval_rmbench_helios.sh` therefore renders through Mesa 26.1.5 lavapipe on CPU while CuRobo and FastWAM remain on the assigned CUDA device. Its defaults preserve the official ray-tracing shader, 32 samples per pixel, and path depth 8. OIDN is set to `none` because its CUDA interop requires the Vulkan render device to be CUDA-visible.
++
++Multiple SAPIEN clients can otherwise fail inside Mesa's native camera calls. The launcher gives every slot a separate XDG/tmp/shader-cache directory, limits lavapipe to one worker thread, and serializes each complete `update_render -> take_picture -> get_picture` observation transaction with a host-level file lock. FastWAM does not consume camera calibration matrices, so the evaluation path also skips those native matrix reads while preserving all three RGB images, qpos, and camera layout.
 +
 +RMBench's bundled CuRobo v0.7.8 uses the legacy `wp.torch` namespace. Install
 +`scripts/rmbench/requirements-eval-compat.txt` in the RMBench environment; it pins
@@ -3662,6 +3664,8 @@ index 0000000..0fa169a
 +
 +Before the full suite, run one end-to-end simulator rollout by setting `RMBENCH_EVAL_ROLLOUTS=1` on the same command. Probe and formal progress files are separate. During formal evaluation the client atomically records the next seed, completed rollout count, and successes after every rollout; a restart continues from that point. A suite task is marked successful only after its `100rollouts` progress reaches 100/100 and a matching result file exists.
 +
++The progress identity includes the exact checkpoint, renderer shader/samples/depth/denoiser, camera-config policy, and GT observation stride. A changed pixel or temporal protocol cannot resume an older progress file; archive or remove that file before deliberately starting a new protocol.
++
 +Run all nine task checkpoints in parallel, with both the FastWAM server and CuRobo
 +simulator pinned to the assigned physical GPU. The full local 9 x 100 run uses one
 +sample per pixel and path depth one because the Vulkan renderer is CPU-only on this
@@ -3672,9 +3676,15 @@ index 0000000..0fa169a
 +RMBENCH_RT_SAMPLES=1 \
 +RMBENCH_RT_PATH_DEPTH=1 \
 +RMBENCH_RT_DENOISER=none \
++RMBENCH_RENDER_LOCK_PATH=/tmp/rmbench-lavapipe-render-$UID.lock \
++RMBENCH_LP_NUM_THREADS=1 \
++RMBENCH_SKIP_CAMERA_CONFIG=1 \
++RMBENCH_OBSERVATION_STRIDE=4 \
 +python scripts/rmbench/launch_rmbench_helios_evaluation.py \
 +  --gpus 0,1,2,3,4,5,6,7 \
 +  --jobs-per-gpu 2 \
++  --max-attempts 20 \
++  --launch-stagger-seconds 20 \
 +  --step 2500
 +```
 +
@@ -3705,13 +3715,15 @@ index 0000000..0fa169a
 +Sources: [RMBench project](https://rmbench.github.io/), [paper](https://arxiv.org/abs/2603.01229), [official repository](https://github.com/robotwin-Platform/rmbench), [current M(1) release](https://huggingface.co/qiuly/Mem-0-m1mix-RMBench), and [current M(n) release](https://huggingface.co/qiuly/Mem-0-mn-RMBench).
 diff --git a/experiments/robotwin/fastwam_helios_client/__init__.py b/experiments/robotwin/fastwam_helios_client/__init__.py
 new file mode 100644
-index 0000000..7b33445
+index 0000000..6791da3
 --- /dev/null
 +++ b/experiments/robotwin/fastwam_helios_client/__init__.py
-@@ -0,0 +1,30 @@
+@@ -0,0 +1,45 @@
 +"""Dependency-light RMBench client bridge for the FastWAM model server."""
 +
 +from __future__ import annotations
++
++import os
 +
 +import numpy as np
 +
@@ -3720,8 +3732,19 @@ index 0000000..7b33445
 +    raise RuntimeError("fastwam_helios_client is a socket client and does not load a local model.")
 +
 +
++def _should_refresh_observation(
++    completed_actions: int, total_actions: int, observation_stride: int
++) -> bool:
++    if observation_stride <= 0:
++        raise ValueError("RMBENCH_OBSERVATION_STRIDE must be positive")
++    if completed_actions <= 0 or completed_actions > total_actions:
++        raise ValueError("completed_actions must be within the current action chunk")
++    return completed_actions < total_actions and completed_actions % observation_stride == 0
++
++
 +def eval(task_env, model_client, observation):
 +    instruction = task_env.get_instruction()
++    observation_stride = int(os.environ.get("RMBENCH_OBSERVATION_STRIDE", "4"))
 +    payload = dict(observation)
 +    payload["_fastwam_instruction"] = instruction
 +    actions = np.asarray(
@@ -3731,7 +3754,9 @@ index 0000000..7b33445
 +        task_env.take_action(action, action_type="qpos")
 +        if task_env.eval_success:
 +            break
-+        if action_index + 1 < len(actions):
++        if _should_refresh_observation(
++            action_index + 1, len(actions), observation_stride
++        ):
 +            follow_up = dict(task_env.get_obs())
 +            follow_up["_fastwam_instruction"] = instruction
 +            model_client.call(func_name="update_obs", obs=follow_up)
@@ -3824,10 +3849,10 @@ index 0000000..ad1dc87
 +    main()
 diff --git a/scripts/rmbench/eval_rmbench_helios.sh b/scripts/rmbench/eval_rmbench_helios.sh
 new file mode 100755
-index 0000000..00e2b5b
+index 0000000..34c934c
 --- /dev/null
 +++ b/scripts/rmbench/eval_rmbench_helios.sh
-@@ -0,0 +1,120 @@
+@@ -0,0 +1,144 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
@@ -3877,9 +3902,14 @@ index 0000000..00e2b5b
 +EVAL_ROLLOUTS="${RMBENCH_EVAL_ROLLOUTS:-100}"
 +PROGRESS_PATH="${RMBENCH_HELIOS_ROOT}/evaluation/${TASK_NAME}/progress_$(basename "${CHECKPOINT}" .pt)_${EVAL_ROLLOUTS}rollouts.json"
 +XDG_RUNTIME_DIR="${XDG_RUNTIME_DIR:-/tmp/rmbench-xdg-${UID}-${GPU_ID}-${PORT}}"
++XDG_CACHE_HOME="${RMBENCH_XDG_CACHE_HOME:-${XDG_RUNTIME_DIR}/cache}"
++TMPDIR="${RMBENCH_TMPDIR:-${XDG_RUNTIME_DIR}/tmp}"
++MESA_SHADER_CACHE_DIR="${RMBENCH_MESA_SHADER_CACHE_DIR:-${XDG_CACHE_HOME}/mesa}"
++RMBENCH_RENDER_LOCK_PATH="${RMBENCH_RENDER_LOCK_PATH:-/tmp/rmbench-lavapipe-render-${UID}.lock}"
 +
 +mkdir -p "$(dirname "${SERVER_LOG}")"
 +mkdir -p "${XDG_RUNTIME_DIR}"
++mkdir -p "${XDG_CACHE_HOME}" "${TMPDIR}" "${MESA_SHADER_CACHE_DIR}"
 +chmod 700 "${XDG_RUNTIME_DIR}"
 +cd "${RMBENCH_ROOT}"
 +
@@ -3889,13 +3919,32 @@ index 0000000..00e2b5b
 +export PYTHONUNBUFFERED=1
 +export PATH="${RMBENCH_ENV_BIN}:${PATH}"
 +export XDG_RUNTIME_DIR
++export XDG_CACHE_HOME
++export TMPDIR
++export MESA_SHADER_CACHE_DIR
++export RMBENCH_RENDER_LOCK_PATH
++export MESA_SHADER_CACHE_MAX_SIZE="${RMBENCH_MESA_SHADER_CACHE_MAX_SIZE:-1G}"
 +export VK_ICD_FILENAMES="${MESA_LAVAPIPE_ICD}"
 +export __EGL_VENDOR_LIBRARY_FILENAMES=/dev/null
-+export LP_NUM_THREADS="${RMBENCH_LP_NUM_THREADS:-16}"
++export LP_NUM_THREADS="${RMBENCH_LP_NUM_THREADS:-1}"
++export OMP_NUM_THREADS="${RMBENCH_OMP_NUM_THREADS:-1}"
++export MKL_NUM_THREADS="${RMBENCH_MKL_NUM_THREADS:-1}"
++export OPENBLAS_NUM_THREADS="${RMBENCH_OPENBLAS_NUM_THREADS:-1}"
++export NUMEXPR_NUM_THREADS="${RMBENCH_NUMEXPR_NUM_THREADS:-1}"
++export BLIS_NUM_THREADS="${RMBENCH_BLIS_NUM_THREADS:-1}"
++export VECLIB_MAXIMUM_THREADS="${RMBENCH_VECLIB_MAXIMUM_THREADS:-1}"
++export RAYON_NUM_THREADS="${RMBENCH_RAYON_NUM_THREADS:-1}"
++export TORCHINDUCTOR_COMPILE_THREADS="${RMBENCH_TORCH_COMPILE_THREADS:-1}"
++export TOKENIZERS_PARALLELISM=false
++export OMP_WAIT_POLICY=PASSIVE
++export MALLOC_ARENA_MAX="${RMBENCH_MALLOC_ARENA_MAX:-4}"
++export PYTHONFAULTHANDLER=1
 +export RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-rt}"
 +export RMBENCH_RT_SAMPLES="${RMBENCH_RT_SAMPLES:-32}"
 +export RMBENCH_RT_PATH_DEPTH="${RMBENCH_RT_PATH_DEPTH:-8}"
 +export RMBENCH_RT_DENOISER="${RMBENCH_RT_DENOISER:-none}"
++export RMBENCH_SKIP_CAMERA_CONFIG="${RMBENCH_SKIP_CAMERA_CONFIG:-1}"
++export RMBENCH_OBSERVATION_STRIDE="${RMBENCH_OBSERVATION_STRIDE:-4}"
 +export PYTHONPATH="${FASTWAM_ROOT}/experiments/robotwin:${FASTWAM_ROOT}/src:${FASTWAM_ROOT}:${RMBENCH_ROOT}/policy:${RMBENCH_ROOT}:${PYTHONPATH:-}"
 +export DIFFSYNTH_MODEL_BASE_PATH="${DIFFSYNTH_MODEL_BASE_PATH:-${FASTWAM_ROOT}/checkpoints}"
 +
@@ -3950,10 +3999,10 @@ index 0000000..00e2b5b
 +  2>&1 | tee "${CLIENT_LOG}"
 diff --git a/scripts/rmbench/launch_rmbench_helios_evaluation.py b/scripts/rmbench/launch_rmbench_helios_evaluation.py
 new file mode 100755
-index 0000000..9e388a4
+index 0000000..61a9853
 --- /dev/null
 +++ b/scripts/rmbench/launch_rmbench_helios_evaluation.py
-@@ -0,0 +1,264 @@
+@@ -0,0 +1,357 @@
 +#!/usr/bin/env python3
 +"""Run official RMBench evaluations with one task bound to each GPU."""
 +
@@ -3965,7 +4014,7 @@ index 0000000..9e388a4
 +import subprocess
 +import time
 +from pathlib import Path
-+from typing import Any
++from typing import Any, Mapping
 +
 +from launch_rmbench_helios_training import _checkpoint_is_complete
 +from prepare_helios_memory_data import OFFICIAL_TASKS
@@ -4013,6 +4062,45 @@ index 0000000..9e388a4
 +    return port_base + int(gpu) * jobs_per_gpu + slot
 +
 +
++def _should_retry(*, succeeded: bool, attempt: int, max_attempts: int) -> bool:
++    return not succeeded and attempt < max_attempts
++
++
++def _environment_bool(environment: Mapping[str, str], name: str, default: str) -> bool:
++    value = environment.get(name, default).strip().lower()
++    if value in {"1", "true", "yes"}:
++        return True
++    if value in {"0", "false", "no"}:
++        return False
++    raise ValueError(f"{name} must be a boolean value, got {value!r}")
++
++
++def _progress_protocol_from_environment(
++    environment: Mapping[str, str] | None = None,
++) -> dict[str, Any]:
++    values = os.environ if environment is None else environment
++    observation_stride = int(values.get("RMBENCH_OBSERVATION_STRIDE", "4"))
++    samples = int(values.get("RMBENCH_RT_SAMPLES", "32"))
++    path_depth = int(values.get("RMBENCH_RT_PATH_DEPTH", "8"))
++    if observation_stride <= 0 or samples <= 0 or path_depth <= 0:
++        raise ValueError(
++            "RMBENCH observation stride, ray-tracing samples, and path depth "
++            "must be positive"
++        )
++    return {
++        "observation_stride_actions": observation_stride,
++        "camera_config_in_observation": not _environment_bool(
++            values, "RMBENCH_SKIP_CAMERA_CONFIG", "0"
++        ),
++        "renderer": {
++            "shader": values.get("RMBENCH_RENDER_SHADER", "rt"),
++            "samples_per_pixel": samples,
++            "path_depth": path_depth,
++            "denoiser": values.get("RMBENCH_RT_DENOISER", "none"),
++        },
++    }
++
++
 +def main() -> None:
 +    parser = argparse.ArgumentParser()
 +    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
@@ -4020,6 +4108,8 @@ index 0000000..9e388a4
 +    parser.add_argument("--step", type=int, default=2500)
 +    parser.add_argument("--port-base", type=int, default=19000)
 +    parser.add_argument("--jobs-per-gpu", type=int, default=1)
++    parser.add_argument("--max-attempts", type=int, default=3)
++    parser.add_argument("--launch-stagger-seconds", type=float, default=0.0)
 +    parser.add_argument("--force", action="store_true")
 +    parser.add_argument(
 +        "--root",
@@ -4045,6 +4135,8 @@ index 0000000..9e388a4
 +        or len(gpu_indices) != len(set(gpu_indices))
 +        or args.step <= 0
 +        or args.jobs_per_gpu <= 0
++        or args.max_attempts <= 0
++        or args.launch_stagger_seconds < 0
 +        or not 1 <= args.port_base <= 65535
 +        or args.port_base + (max(gpu_indices, default=0) + 1) * args.jobs_per_gpu > 65536
 +        or not args.tasks
@@ -4052,20 +4144,24 @@ index 0000000..9e388a4
 +        or unknown
 +    ):
 +        parser.error(
-+            "At least one GPU, positive --step/--jobs-per-gpu, a valid port range, "
++            "At least one GPU, positive --step/--jobs-per-gpu/--max-attempts, "
++            "non-negative --launch-stagger-seconds, "
++            "a valid port range, "
 +            f"and unique official task names are required; unknown={unknown}"
 +        )
 +
 +    root = args.root.expanduser().resolve()
 +    rmbench_root = args.rmbench_root.expanduser().resolve()
++    progress_protocol = _progress_protocol_from_environment()
 +    script = Path(__file__).with_name("eval_rmbench_helios.sh").resolve()
 +    receipt_dir = root / "evaluation" / "receipts"
 +    log_dir = root / "evaluation" / "launch_logs"
 +    receipt_dir.mkdir(parents=True, exist_ok=True)
 +    log_dir.mkdir(parents=True, exist_ok=True)
 +
-+    pending: list[tuple[str, Path]] = []
++    pending: list[tuple[str, Path, int]] = []
 +    results: dict[str, dict[str, Any]] = {}
++    attempt_history: dict[str, list[dict[str, Any]]] = {}
 +    for task in args.tasks:
 +        checkpoint = _checkpoint(root, task, args.step)
 +        receipt_path = receipt_dir / f"{task}.json"
@@ -4088,17 +4184,17 @@ index 0000000..9e388a4
 +            results[task] = existing
 +            print(f"[reuse] task={task} result={existing['result_path']}", flush=True)
 +        else:
-+            pending.append((task, checkpoint))
++            pending.append((task, checkpoint, 1))
 +
 +    running: dict[
-+        str, tuple[subprocess.Popen[bytes], object, str, int, int, Path, float]
++        str, tuple[subprocess.Popen[bytes], object, str, int, int, Path, float, int]
 +    ] = {}
 +    while pending or running:
 +        occupied = {(value[2], value[3]) for value in running.values()}
 +        for gpu, gpu_slot in _available_slots(gpus, args.jobs_per_gpu, occupied):
 +            if not pending:
 +                break
-+            task, checkpoint = pending.pop(0)
++            task, checkpoint, attempt = pending.pop(0)
 +            port = _port_for_slot(args.port_base, gpu, args.jobs_per_gpu, gpu_slot)
 +            log_path = log_dir / f"{task}.log"
 +            if args.force:
@@ -4128,18 +4224,31 @@ index 0000000..9e388a4
 +                port,
 +                checkpoint,
 +                started_at,
++                attempt,
 +            )
 +            print(
-+                f"[launch] task={task} gpu={gpu} slot={gpu_slot} port={port} "
++                f"[launch] task={task} attempt={attempt}/{args.max_attempts} "
++                f"gpu={gpu} slot={gpu_slot} port={port} "
 +                f"pid={process.pid} "
 +                f"checkpoint={checkpoint} log={log_path}",
 +                flush=True,
 +            )
++            if args.launch_stagger_seconds:
++                time.sleep(args.launch_stagger_seconds)
 +
 +        if running:
 +            time.sleep(10)
 +        for task, values in list(running.items()):
-+            process, log_handle, gpu, gpu_slot, port, checkpoint, started_at = values
++            (
++                process,
++                log_handle,
++                gpu,
++                gpu_slot,
++                port,
++                checkpoint,
++                started_at,
++                attempt,
++            ) = values
 +            return_code = process.poll()
 +            if return_code is None:
 +                continue
@@ -4159,7 +4268,35 @@ index 0000000..9e388a4
 +                and progress.get("status") == "completed"
 +                and int(progress.get("evaluated_rollouts", -1)) == 100
 +                and int((progress.get("identity") or {}).get("target_rollouts", -1)) == 100
++                and (progress.get("identity") or {}).get("protocol")
++                == progress_protocol
 +            )
++            finished_at = time.time()
++            attempt_history.setdefault(task, []).append(
++                {
++                    "attempt": attempt,
++                    "return_code": return_code,
++                    "started_at_unix": started_at,
++                    "finished_at_unix": finished_at,
++                    "progress_status": None if progress is None else progress.get("status"),
++                    "evaluated_rollouts": (
++                        None if progress is None else progress.get("evaluated_rollouts")
++                    ),
++                }
++            )
++            del running[task]
++            if _should_retry(
++                succeeded=succeeded,
++                attempt=attempt,
++                max_attempts=args.max_attempts,
++            ):
++                pending.append((task, checkpoint, attempt + 1))
++                print(
++                    f"[retry] task={task} failed attempt={attempt}/{args.max_attempts} "
++                    f"return_code={return_code}; progress will resume if available",
++                    flush=True,
++                )
++                continue
 +            receipt = {
 +                "schema_version": "fastwam-rmbench-evaluation-task-v1",
 +                "status": "succeeded" if succeeded else "failed",
@@ -4169,24 +4306,28 @@ index 0000000..9e388a4
 +                "port": port,
 +                "checkpoint": str(checkpoint),
 +                "return_code": return_code,
++                "attempt": attempt,
++                "attempts": attempt_history[task],
 +                "result_path": None if result_path is None else str(result_path.resolve()),
 +                "progress_path": str(progress_path.resolve()),
 +                "started_at_unix": started_at,
-+                "finished_at_unix": time.time(),
++                "finished_at_unix": finished_at,
 +                "protocol": {
 +                    "rollouts": 100,
 +                    "instruction_type": "unseen",
 +                    "expert_seed_filter": True,
++                    "observation_stride_actions": progress_protocol[
++                        "observation_stride_actions"
++                    ],
++                    "camera_config_in_observation": progress_protocol[
++                        "camera_config_in_observation"
++                    ],
 +                    "renderer": {
-+                        "shader": os.environ.get("RMBENCH_RENDER_SHADER", "rt"),
-+                        "samples_per_pixel": int(
-+                            os.environ.get("RMBENCH_RT_SAMPLES", "32")
-+                        ),
-+                        "path_depth": int(
-+                            os.environ.get("RMBENCH_RT_PATH_DEPTH", "8")
-+                        ),
-+                        "denoiser": os.environ.get("RMBENCH_RT_DENOISER", "none"),
++                        **progress_protocol["renderer"],
 +                        "vulkan_device": "Mesa lavapipe (CPU)",
++                        "interprocess_lock_path": os.environ.get(
++                            "RMBENCH_RENDER_LOCK_PATH"
++                        ),
 +                    },
 +                },
 +            }
@@ -4194,7 +4335,6 @@ index 0000000..9e388a4
 +                json.dumps(receipt, indent=2, sort_keys=True) + "\n", encoding="utf-8"
 +            )
 +            results[task] = receipt
-+            del running[task]
 +            print(
 +                f"[done] task={task} gpu={gpu} status={receipt['status']} "
 +                f"result={receipt['result_path']}",
@@ -4206,6 +4346,8 @@ index 0000000..9e388a4
 +        "tasks": list(args.tasks),
 +        "checkpoint_step_requested": args.step,
 +        "jobs_per_gpu": args.jobs_per_gpu,
++        "max_attempts": args.max_attempts,
++        "launch_stagger_seconds": args.launch_stagger_seconds,
 +        "results": results,
 +        "succeeded": all(item.get("status") == "succeeded" for item in results.values()),
 +    }
@@ -4809,10 +4951,10 @@ index 0000000..2161420
 +warp-lang==1.8.0
 diff --git a/scripts/rmbench/summarize_rmbench_results.py b/scripts/rmbench/summarize_rmbench_results.py
 new file mode 100755
-index 0000000..21d51d1
+index 0000000..f452cda
 --- /dev/null
 +++ b/scripts/rmbench/summarize_rmbench_results.py
-@@ -0,0 +1,340 @@
+@@ -0,0 +1,355 @@
 +#!/usr/bin/env python3
 +"""Compare Helios MemoryFastWAM RMBench rollouts with the official table."""
 +
@@ -4909,11 +5051,26 @@ index 0000000..21d51d1
 +    identity = progress.get("identity") or {}
 +    feasible_seeds = progress.get("expert_feasible_seeds") or []
 +    successes = int(progress.get("successes", -1))
++    receipt_protocol = receipt.get("protocol") or {}
++    receipt_renderer = receipt_protocol.get("renderer") or {}
++    expected_progress_protocol = {
++        "observation_stride_actions": receipt_protocol.get(
++            "observation_stride_actions"
++        ),
++        "camera_config_in_observation": receipt_protocol.get(
++            "camera_config_in_observation"
++        ),
++        "renderer": {
++            key: receipt_renderer.get(key)
++            for key in ("shader", "samples_per_pixel", "path_depth", "denoiser")
++        },
++    }
 +    if (
 +        progress.get("status") != "completed"
 +        or int(progress.get("evaluated_rollouts", -1)) != 100
 +        or int(identity.get("target_rollouts", -1)) != 100
 +        or Path(str(identity.get("checkpoint", ""))).resolve() != checkpoint.resolve()
++        or identity.get("protocol") != expected_progress_protocol
 +        or len(feasible_seeds) != 100
 +        or len(set(int(seed) for seed in feasible_seeds)) != 100
 +        or not 0 <= successes <= 100
@@ -9130,10 +9287,10 @@ index 0000000..d2a44d1
 +    assert torch.equal(video_expert.post_tokens, torch.full((1, 2, 4), 7.0))
 diff --git a/tests/test_rmbench_launchers.py b/tests/test_rmbench_launchers.py
 new file mode 100644
-index 0000000..8980d9f
+index 0000000..d1c2fb5
 --- /dev/null
 +++ b/tests/test_rmbench_launchers.py
-@@ -0,0 +1,90 @@
+@@ -0,0 +1,157 @@
 +import json
 +import sys
 +import zipfile
@@ -9148,10 +9305,15 @@ index 0000000..8980d9f
 +    _checkpoint_is_complete,
 +    _latest_training_state,
 +)
++from experiments.robotwin.fastwam_helios_client import (  # noqa: E402
++    _should_refresh_observation,
++)
 +from launch_rmbench_helios_evaluation import (  # noqa: E402
 +    _available_slots,
 +    _checkpoint,
 +    _port_for_slot,
++    _progress_protocol_from_environment,
++    _should_retry,
 +)
 +
 +
@@ -9224,6 +9386,68 @@ index 0000000..8980d9f
 +    assert len({_port_for_slot(19000, gpu, 2, slot) for gpu, slot in slots}) == 16
 +    assert _port_for_slot(19000, "0", 2, 0) == 19000
 +    assert _port_for_slot(19000, "7", 2, 1) == 19015
++
++
++def test_evaluation_retries_native_failures_but_stops_at_the_bound():
++    assert _should_retry(succeeded=False, attempt=1, max_attempts=3)
++    assert _should_retry(succeeded=False, attempt=2, max_attempts=3)
++    assert not _should_retry(succeeded=False, attempt=3, max_attempts=3)
++    assert not _should_retry(succeeded=True, attempt=1, max_attempts=3)
++
++
++def test_rmbench_observation_refresh_matches_fastwam_video_stride():
++    assert [
++        completed
++        for completed in range(1, 9)
++        if _should_refresh_observation(completed, 8, 4)
++    ] == [4]
++    assert [
++        completed
++        for completed in range(1, 9)
++        if _should_refresh_observation(completed, 8, 1)
++    ] == list(range(1, 8))
++
++
++def test_evaluation_progress_identity_captures_pixels_and_observation_cadence():
++    protocol = _progress_protocol_from_environment(
++        {
++            "RMBENCH_OBSERVATION_STRIDE": "4",
++            "RMBENCH_SKIP_CAMERA_CONFIG": "1",
++            "RMBENCH_RENDER_SHADER": "rt",
++            "RMBENCH_RT_SAMPLES": "1",
++            "RMBENCH_RT_PATH_DEPTH": "1",
++            "RMBENCH_RT_DENOISER": "none",
++        }
++    )
++    assert protocol == {
++        "observation_stride_actions": 4,
++        "camera_config_in_observation": False,
++        "renderer": {
++            "shader": "rt",
++            "samples_per_pixel": 1,
++            "path_depth": 1,
++            "denoiser": "none",
++        },
++    }
++
++
++def test_eval_shell_caps_cpu_thread_pools():
++    script = (SCRIPT_DIR / "eval_rmbench_helios.sh").read_text(encoding="utf-8")
++    for variable in (
++        "LP_NUM_THREADS",
++        "OMP_NUM_THREADS",
++        "MKL_NUM_THREADS",
++        "OPENBLAS_NUM_THREADS",
++        "NUMEXPR_NUM_THREADS",
++        "TORCHINDUCTOR_COMPILE_THREADS",
++        "PYTHONFAULTHANDLER",
++        "XDG_CACHE_HOME",
++        "MESA_SHADER_CACHE_DIR",
++        "RMBENCH_RENDER_LOCK_PATH",
++        "RMBENCH_SKIP_CAMERA_CONFIG",
++        "RMBENCH_OBSERVATION_STRIDE",
++    ):
++        assert f"export {variable}" in script
 diff --git a/tests/test_rmbench_memory_dataset.py b/tests/test_rmbench_memory_dataset.py
 new file mode 100644
 index 0000000..1259648
@@ -9429,10 +9653,10 @@ index 0000000..1259648
 +    ).tolist() == [0] * 11
 diff --git a/tests/test_rmbench_results.py b/tests/test_rmbench_results.py
 new file mode 100644
-index 0000000..f7ebf93
+index 0000000..fb3d4a6
 --- /dev/null
 +++ b/tests/test_rmbench_results.py
-@@ -0,0 +1,117 @@
+@@ -0,0 +1,139 @@
 +import json
 +import sys
 +import zipfile
@@ -9475,6 +9699,16 @@ index 0000000..f7ebf93
 +        archive.writestr("archive/version", b"3\n")
 +    result.write_text("0.25\n", encoding="utf-8")
 +    progress = tmp_path / "progress.json"
++    progress_protocol = {
++        "observation_stride_actions": 4,
++        "camera_config_in_observation": False,
++        "renderer": {
++            "shader": "rt",
++            "samples_per_pixel": 1,
++            "path_depth": 1,
++            "denoiser": "none",
++        },
++    }
 +    progress.write_text(
 +        json.dumps(
 +            {
@@ -9482,6 +9716,7 @@ index 0000000..f7ebf93
 +                "identity": {
 +                    "checkpoint": str(checkpoint),
 +                    "target_rollouts": 100,
++                    "protocol": progress_protocol,
 +                },
 +                "evaluated_rollouts": 100,
 +                "successes": 25,
@@ -9497,7 +9732,7 @@ index 0000000..f7ebf93
 +        "checkpoint": str(checkpoint),
 +        "result_path": str(result),
 +        "progress_path": str(progress),
-+        "protocol": {"rollouts": 100},
++        "protocol": {"rollouts": 100, **progress_protocol},
 +    }
 +    (receipt_root / "press_button.json").write_text(
 +        json.dumps(receipt), encoding="utf-8"
@@ -9517,6 +9752,17 @@ index 0000000..f7ebf93
 +    else:
 +        raise AssertionError("result receipt accepted a score/count mismatch")
 +    progress_payload["successes"] = 25
++    progress.write_text(json.dumps(progress_payload), encoding="utf-8")
++
++    progress_payload["identity"]["protocol"]["observation_stride_actions"] = 1
++    progress.write_text(json.dumps(progress_payload), encoding="utf-8")
++    try:
++        _result_from_receipt(receipt_root, "press_button", 2500)
++    except ValueError as error:
++        assert "Invalid 100-rollout progress" in str(error)
++    else:
++        raise AssertionError("result receipt accepted a mixed observation protocol")
++    progress_payload["identity"]["protocol"]["observation_stride_actions"] = 4
 +    progress.write_text(json.dumps(progress_payload), encoding="utf-8")
 +
 +    try:

@@ -147,6 +147,7 @@ python3 scripts/install_dreamzero_profile.py \
 7. [三模型统一微调](docs/training/THREE_MODEL_TUNING.md)
 8. [FastWAM 天机单窗口过拟合](docs/training/FASTWAM_TIANJI_OVERFIT.md)
 9. [FastWAM 天机全数据原始鱼眼域过拟合](docs/training/FASTWAM_TIANJI_DATASET_OVERFIT.md)
+10. [RMBench Helios MemoryFastWAM](docs/training/RMBENCH_HELIOS.md)
 
 ## 仓库结构
 
@@ -170,6 +171,7 @@ python3 -m compileall -q fastwam_preprocess targets tuning scripts tests
 scripts/export_code.sh /tmp/Process_WM_Data.tar.gz
 ```
 
-当前三模型已完成真实单步与断点恢复 smoke，FastWAM 天机固定窗口已完成累计 900 步严格
-overfit；全量下载、九库生产训练、LingBot-VA
-全部 latent 和闭环评测仍有独立 readiness gate。详见 [当前验收状态](docs/reference/VALIDATION_STATUS.md)。
+当前三模型均已完成真实 optimizer/checkpoint 路径。FastWAM 天机全数据已累计训练 2,500
+steps，old LingBot-VA 已完成 132/132 latent 和 8 卡全数据 overfit，DreamZero 已完成 8 卡训练
+及 8 case、每 case 913 帧的 GT-observation Pair 推理。九库生产训练和闭环评测仍各有独立
+readiness gate。详见 [当前验收状态](docs/reference/VALIDATION_STATUS.md)。

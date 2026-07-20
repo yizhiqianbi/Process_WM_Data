@@ -2,7 +2,7 @@
 
 [文档索引](../README.md)
 
-Updated: 2026-07-19
+Updated: 2026-07-20
 
 This page records what has been demonstrated by executable tests and real source files. It is
 not a claim that every upstream dataset has finished downloading or that production pretraining
@@ -30,16 +30,20 @@ from this repository.
 | Unified three-model launcher | Passed | Structured argv, explicit 1/8-GPU torchrun world size, external SHA, logs, receipts, checkpoint discovery and resume |
 | FastWAM self-data optimizer/resume | Passed | Real step 1, full-state resume to step 2, action/video/memory losses finite |
 | FastWAM Tianji fixed-window overfit | Passed | Step 300 first passes; selected cumulative step 900: 26.8693 dB, 0.9313 SSIM, action L1 0.01941; memory fully valid |
-| Tianji active camera-domain policy | Training-validated smoke | Active full-dataset run preserves raw fisheye; all 8 probes report `[false,false,false]` rectification masks and null config |
-| Tianji dataset-overfit plan | 8-GPU training active | 44 episodes, 486 windows, 8 fixed cross-episode probes; true 8-rank DDP step-2 smoke passed and 1,250-global-step run launched; convergence pending |
+| Tianji active camera-domain policy | Passed | The completed full-dataset run preserves raw fisheye; every 8-probe suite reports `[false,false,false]` rectification masks and null config |
+| Tianji dataset overfit | Passed | 44 episodes, 486 windows, 8 fixed cross-episode probes and cumulative 2,500 steps; final val loss `0.02562`, PSNR `19.1814 dB`, SSIM `0.78697`, action L1 `0.04041`, memory-valid `1.0` |
 | FastWAM DDP contract | Passed | World size 8, global batch 8, eight unique first-batch indices, post-step parameter probe max difference `0.000e+00` |
 | FastWAM inference/GT pair demo | Training-validated smoke | 8 probes are rank-sharded and merged once; synchronized H.264 640x416/21-frame imagination-vs-execution pairs and action composites passed |
 | Old LingBot-VA optimizer/resume | Passed on one complete three-view latent segment | Real step 1, optimizer/scheduler resume to step 2, latent/action losses finite |
+| Old LingBot-VA full self-data overfit | Passed | 44 episodes and 132/132 latents; 8 H200, batch 24/GPU, global batch 192, 250/250 steps; complete checkpoints at steps 125 and 250 |
 | DreamZero optimizer/resume | Passed | Real LoRA step 1, Trainer resume to step 2, dynamics/action losses finite |
 | DreamZero full self-data overfit | Passed | 8 H200, 44 episodes, global batch 8, 500/500 steps; complete `checkpoint-500`, final loss `0.0651` |
 | DreamZero GT-observation Pair inference | Passed | Longest 8 eligible episodes, 913 frames/case and 7304-frame reel; all 33 MP4 files/36,520 frames decoded, GT frame IDs audited, no future-GT or predicted-latent observation feedback |
+| RMBench Helios-memory preparation | Passed | Official 9 tasks, 450 episodes, 277,350 frames and 241,350 valid 81-frame windows; 14D qpos-next mapping, per-task stats and causal 8/2/1 memory audited |
+| RMBench nine-task fine-tuning | Passed | 9/9 tasks completed 2,500 steps from the cumulative Tianji-2,500 initialization; 45/45 policy checkpoints and 45/45 complete optimizer states validated |
+| RMBench closed-loop evaluation | Running, resumable | Exact step-2,500 checkpoints, unseen instructions and 100 expert-feasible rollouts/task; 8-GPU model execution with serialized Mesa observation rendering and atomic per-rollout progress |
 | Repository tests | Passed | 78 tests, including target preparation, long DreamZero Pair scheduling, 8-GPU launchers, rectification and tuning contracts |
-| FastWAM integration tests | Passed | 41 tests in the connected checkout, including canonical RMBench data/memory/action contracts and launch/result validation |
+| FastWAM integration tests | Passed | 45 tests in the connected checkout, including canonical RMBench data/memory/action contracts, protocol-identity gating, stride-aligned GT observation refresh, bounded native-failure retry and result validation |
 | AgiBot-specific optimizer/checkpoint smoke | Pending dataset-specific run | The current optimizer proof uses `take_wrong_item_right_arm`, not AgiBot |
 | Full nine-domain production stats | Pending full manifests | Validation stats currently cover only locally materialized train/A/joint domains |
 
@@ -88,10 +92,10 @@ now been exercised for the current self-data target. Exact source layouts and co
 The model-target exporters were also run against the current 44-episode, 31,359-frame,
 LeRobot v2.1 `take_wrong_item_right_arm` dataset. The old LingBot-VA exporter compacted the
 15D action to eight declared right-arm/right-gripper dimensions and emitted 132 deterministic
-latent jobs. Three episode-0 latents, one for each configured physical view, currently exist and
-were sufficient for the bounded LingBot smoke; this target is still not production-ready until
-all 132 VAE latents exist. The launcher rejects this partial state by default and permits it only
-when `allow_partial_latents: true` is explicit.
+latent jobs. All 132 VAE latents pass manifest/payload frame-ID validation. The full target then
+trained for 250 steps on eight H200 GPUs with 24 fixed 16-latent-frame windows per GPU, for a
+global batch of 192. Complete model and training state were saved at steps 125 and 250; the final
+logged losses were latent `0.0646` and action `0.0031`.
 
 The DreamZero exporter emitted custom GEAR metadata, relative statistics, language, and a Hydra
 profile. That profile is installed and checked against the existing `EmbodimentTag.XDOF` and
