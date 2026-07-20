@@ -14,17 +14,19 @@ The patch is pinned to official RMBench commit:
 Patch SHA-256:
 
 ```text
-c11a1c770eef27d271fc457e11e75c526ae5fc5dc8681dc9b72e65d896ac567f
+853a43643bed7c2f4d26757717671eaf7e1907f2c8efb866d0206f054fc9ff4c
 ```
 
 It adds the following runtime contracts:
 
-- Environment-controlled SAPIEN ray-tracing settings for headless renderer
-  compatibility.
+- Environment-controlled SAPIEN raster/ray-tracing selection for headless
+  renderer compatibility, with raster as the stable Mesa fallback.
 - Portable validation and resolution of CuRobo asset paths without changing the
   checked-in robot YAML files.
 - A 600-second model-server socket timeout for long FastWAM inference calls.
 - Atomic, identity-checked evaluation progress after every completed rollout.
+- Renderer protocol identity that records the pipeline and stores
+  ray-tracing-only fields as null for raster runs.
 - Resume support for the official expert-feasible seed scan.
 - A bounded consecutive setup-error gate so dependency failures cannot be
   silently counted as policy failures.
@@ -49,9 +51,11 @@ scripts/apply_rmbench_runtime_patch.sh --check /path/to/rmbench
 scripts/apply_rmbench_runtime_patch.sh --apply /path/to/rmbench
 ```
 
-The current node evaluates SAPIEN through Mesa lavapipe because its H200 devices
-do not expose Vulkan graphics queues. That Mesa installation is an environment
-dependency and is not bundled here. RMBench's bundled CuRobo also requires
+The current node evaluates SAPIEN's `default` raster shader through Mesa
+lavapipe because its H200 devices do not expose Vulkan graphics queues. The
+CPU ray-tracing path is selectable but was not stable enough for the 9 x 100
+suite. That Mesa installation is an environment dependency and is not bundled
+here. RMBench's bundled CuRobo also requires
 `warp-lang==1.8.0` because it imports the legacy `wp.torch` namespace. The
 FastWAM-side launcher performs both dependency checks before starting a rollout.
 

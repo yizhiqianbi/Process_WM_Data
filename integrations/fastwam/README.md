@@ -10,7 +10,7 @@ It contains no model weights, datasets, caches, or credentials.
 Current patch SHA256:
 
 ```text
-fc7efc48a4da4265c745e3617fa439965b5e48b8a0d048a7f62c7047e6930e1d
+0f7c8b2bbdd82f8baf9364091f7a938b3bf7f32a702476083f138dc338b8d161
 ```
 
 The patch is pinned to upstream FastWAM commit:
@@ -43,7 +43,7 @@ keeps canonical padded action dimensions zero throughout flow-matching denoising
 fisheye-to-pinhole mapping, synchronized imagination/GT pair dimensions, DDP-safe wrapped model
 forward, complete ordered merging of rank-sharded fixed probes, and RMBench data/memory/result
 contracts, stride-aligned GT observation refresh, bounded evaluator retry, CPU thread-pool
-limits and renderer isolation. RMBench
+limits, renderer isolation, and explicit raster-versus-ray-tracing protocol identity. RMBench
 simulator-side changes are a separate pinned patch under
 [`integrations/rmbench/`](../rmbench/README.md).
 

@@ -3547,10 +3547,10 @@ index 0000000..302a0ce
 +  enabled: false
 diff --git a/docs/RMBENCH_HELIOS.md b/docs/RMBENCH_HELIOS.md
 new file mode 100644
-index 0000000..dc4f42a
+index 0000000..3e11d3f
 --- /dev/null
 +++ b/docs/RMBENCH_HELIOS.md
-@@ -0,0 +1,162 @@
+@@ -0,0 +1,159 @@
 +# RMBench Helios MemoryFastWAM
 +
 +This integration trains the local Helios-style FastWAM memory architecture directly from the official RMBench `demo_clean` HDF5 files and evaluates it with the official closed-loop simulator protocol.
@@ -3641,7 +3641,7 @@ index 0000000..dc4f42a
 +
 +The policy predicts canonical 80D actions, applies the canonical invalid-dimension mask during diffusion, denormalizes with task-specific stats, and maps the 14 active values back to RMBench qpos order. It executes eight actions before replanning.
 +
-+The simulator and model run in separate environments because RMBench pins PyTorch 2.4.1 while FastWAM uses PyTorch 2.7.1. The H200 compute devices on this node do not expose Vulkan graphics queues to SAPIEN. `eval_rmbench_helios.sh` therefore renders through Mesa 26.1.5 lavapipe on CPU while CuRobo and FastWAM remain on the assigned CUDA device. Its defaults preserve the official ray-tracing shader, 32 samples per pixel, and path depth 8. OIDN is set to `none` because its CUDA interop requires the Vulkan render device to be CUDA-visible.
++The simulator and model run in separate environments because RMBench pins PyTorch 2.4.1 while FastWAM uses PyTorch 2.7.1. The H200 compute devices on this node do not expose Vulkan graphics queues to SAPIEN. `eval_rmbench_helios.sh` therefore renders through Mesa 26.1.5 lavapipe on CPU while CuRobo and FastWAM remain on the assigned CUDA device. The Helios evaluation wrapper defaults to SAPIEN's `default` raster camera shader. Mesa's CPU `rt` path remains selectable, but repeated native camera crashes make it unsuitable for the 9 x 100 local suite. OIDN also cannot be used because its CUDA interop requires the Vulkan render device to be CUDA-visible.
 +
 +Multiple SAPIEN clients can otherwise fail inside Mesa's native camera calls. The launcher gives every slot a separate XDG/tmp/shader-cache directory, limits lavapipe to one worker thread, and serializes each complete `update_render -> take_picture -> get_picture` observation transaction with a host-level file lock. FastWAM does not consume camera calibration matrices, so the evaluation path also skips those native matrix reads while preserving all three RGB images, qpos, and camera layout.
 +
@@ -3651,7 +3651,7 @@ index 0000000..dc4f42a
 +workers to exit during setup. The evaluation shell checks this compatibility before
 +starting either the simulator or model server.
 +
-+This renderer fallback is operationally necessary but is not pixel-equivalent to the official GPU-plus-OIDN environment. The evaluation receipts record `shader`, samples, path depth, denoiser, and Vulkan device; leaderboard tables must label this renderer difference.
++This renderer fallback is operationally necessary but is not pixel-equivalent to the official GPU ray-tracing environment. The evaluation receipts record raster versus ray-tracing pipeline, shader, applicable ray-tracing parameters, and Vulkan device; leaderboard tables must label this renderer difference.
 +
 +```bash
 +bash scripts/rmbench/eval_rmbench_helios.sh \
@@ -3664,18 +3664,15 @@ index 0000000..dc4f42a
 +
 +Before the full suite, run one end-to-end simulator rollout by setting `RMBENCH_EVAL_ROLLOUTS=1` on the same command. Probe and formal progress files are separate. During formal evaluation the client atomically records the next seed, completed rollout count, and successes after every rollout; a restart continues from that point. A suite task is marked successful only after its `100rollouts` progress reaches 100/100 and a matching result file exists.
 +
-+The progress identity includes the exact checkpoint, renderer shader/samples/depth/denoiser, camera-config policy, and GT observation stride. A changed pixel or temporal protocol cannot resume an older progress file; archive or remove that file before deliberately starting a new protocol.
++The progress identity includes the exact checkpoint, renderer pipeline and settings, camera-config policy, and GT observation stride. Raster receipts store ray-tracing-only fields as null. A changed pixel or temporal protocol cannot resume an older progress file; archive or remove that file before deliberately starting a new protocol.
 +
 +Run all nine task checkpoints in parallel, with both the FastWAM server and CuRobo
-+simulator pinned to the assigned physical GPU. The full local 9 x 100 run uses one
-+sample per pixel and path depth one because the Vulkan renderer is CPU-only on this
-+node; without this explicit override, the 32/8 defaults are not operationally
-+tractable for the complete suite:
++simulator pinned to the assigned physical GPU. The full local 9 x 100 run explicitly
++selects the SAPIEN default raster pipeline. Ray-tracing samples, path depth, and denoiser
++do not apply to this pipeline:
 +
 +```bash
-+RMBENCH_RT_SAMPLES=1 \
-+RMBENCH_RT_PATH_DEPTH=1 \
-+RMBENCH_RT_DENOISER=none \
++RMBENCH_RENDER_SHADER=default \
 +RMBENCH_RENDER_LOCK_PATH=/tmp/rmbench-lavapipe-render-$UID.lock \
 +RMBENCH_LP_NUM_THREADS=1 \
 +RMBENCH_SKIP_CAMERA_CONFIG=1 \
@@ -3849,7 +3846,7 @@ index 0000000..ad1dc87
 +    main()
 diff --git a/scripts/rmbench/eval_rmbench_helios.sh b/scripts/rmbench/eval_rmbench_helios.sh
 new file mode 100755
-index 0000000..34c934c
+index 0000000..f09fe92
 --- /dev/null
 +++ b/scripts/rmbench/eval_rmbench_helios.sh
 @@ -0,0 +1,144 @@
@@ -3939,7 +3936,7 @@ index 0000000..34c934c
 +export OMP_WAIT_POLICY=PASSIVE
 +export MALLOC_ARENA_MAX="${RMBENCH_MALLOC_ARENA_MAX:-4}"
 +export PYTHONFAULTHANDLER=1
-+export RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-rt}"
++export RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-default}"
 +export RMBENCH_RT_SAMPLES="${RMBENCH_RT_SAMPLES:-32}"
 +export RMBENCH_RT_PATH_DEPTH="${RMBENCH_RT_PATH_DEPTH:-8}"
 +export RMBENCH_RT_DENOISER="${RMBENCH_RT_DENOISER:-none}"
@@ -3999,10 +3996,10 @@ index 0000000..34c934c
 +  2>&1 | tee "${CLIENT_LOG}"
 diff --git a/scripts/rmbench/launch_rmbench_helios_evaluation.py b/scripts/rmbench/launch_rmbench_helios_evaluation.py
 new file mode 100755
-index 0000000..61a9853
+index 0000000..4be1c89
 --- /dev/null
 +++ b/scripts/rmbench/launch_rmbench_helios_evaluation.py
-@@ -0,0 +1,357 @@
+@@ -0,0 +1,372 @@
 +#!/usr/bin/env python3
 +"""Run official RMBench evaluations with one task bound to each GPU."""
 +
@@ -4080,24 +4077,39 @@ index 0000000..61a9853
 +) -> dict[str, Any]:
 +    values = os.environ if environment is None else environment
 +    observation_stride = int(values.get("RMBENCH_OBSERVATION_STRIDE", "4"))
-+    samples = int(values.get("RMBENCH_RT_SAMPLES", "32"))
-+    path_depth = int(values.get("RMBENCH_RT_PATH_DEPTH", "8"))
-+    if observation_stride <= 0 or samples <= 0 or path_depth <= 0:
-+        raise ValueError(
-+            "RMBENCH observation stride, ray-tracing samples, and path depth "
-+            "must be positive"
-+        )
++    if observation_stride <= 0:
++        raise ValueError("RMBENCH observation stride must be positive")
++    shader = values.get("RMBENCH_RENDER_SHADER", "default").strip()
++    if not shader:
++        raise ValueError("RMBENCH_RENDER_SHADER must not be empty")
++    if shader == "rt":
++        samples = int(values.get("RMBENCH_RT_SAMPLES", "32"))
++        path_depth = int(values.get("RMBENCH_RT_PATH_DEPTH", "8"))
++        if samples <= 0 or path_depth <= 0:
++            raise ValueError(
++                "RMBENCH ray-tracing samples and path depth must be positive"
++            )
++        renderer = {
++            "shader": shader,
++            "pipeline": "ray_tracing",
++            "samples_per_pixel": samples,
++            "path_depth": path_depth,
++            "denoiser": values.get("RMBENCH_RT_DENOISER", "none"),
++        }
++    else:
++        renderer = {
++            "shader": shader,
++            "pipeline": "raster",
++            "samples_per_pixel": None,
++            "path_depth": None,
++            "denoiser": None,
++        }
 +    return {
 +        "observation_stride_actions": observation_stride,
 +        "camera_config_in_observation": not _environment_bool(
 +            values, "RMBENCH_SKIP_CAMERA_CONFIG", "0"
 +        ),
-+        "renderer": {
-+            "shader": values.get("RMBENCH_RENDER_SHADER", "rt"),
-+            "samples_per_pixel": samples,
-+            "path_depth": path_depth,
-+            "denoiser": values.get("RMBENCH_RT_DENOISER", "none"),
-+        },
++        "renderer": renderer,
 +    }
 +
 +
@@ -4951,10 +4963,10 @@ index 0000000..2161420
 +warp-lang==1.8.0
 diff --git a/scripts/rmbench/summarize_rmbench_results.py b/scripts/rmbench/summarize_rmbench_results.py
 new file mode 100755
-index 0000000..f452cda
+index 0000000..90b2254
 --- /dev/null
 +++ b/scripts/rmbench/summarize_rmbench_results.py
-@@ -0,0 +1,355 @@
+@@ -0,0 +1,367 @@
 +#!/usr/bin/env python3
 +"""Compare Helios MemoryFastWAM RMBench rollouts with the official table."""
 +
@@ -5062,7 +5074,13 @@ index 0000000..f452cda
 +        ),
 +        "renderer": {
 +            key: receipt_renderer.get(key)
-+            for key in ("shader", "samples_per_pixel", "path_depth", "denoiser")
++            for key in (
++                "shader",
++                "pipeline",
++                "samples_per_pixel",
++                "path_depth",
++                "denoiser",
++            )
 +        },
 +    }
 +    if (
@@ -5094,13 +5112,14 @@ index 0000000..f452cda
 +
 +
 +def _renderer_note(protocols: dict[str, Any]) -> str:
-+    normalized: set[tuple[str, str, str, str, str]] = set()
++    normalized: set[tuple[str, str, str, str, str, str]] = set()
 +    for renderer in protocols.values():
 +        if not isinstance(renderer, dict):
 +            continue
 +        normalized.add(
 +            (
 +                str(renderer.get("shader", "unknown")),
++                str(renderer.get("pipeline", "unknown")),
 +                str(renderer.get("samples_per_pixel", "unknown")),
 +                str(renderer.get("path_depth", "unknown")),
 +                str(renderer.get("denoiser", "unknown")),
@@ -5113,10 +5132,15 @@ index 0000000..f452cda
 +            "loaded."
 +        )
 +
-+    descriptions = [
-+        f"{shader}, {samples} spp, depth {depth}, denoiser {denoiser}, device {device}"
-+        for shader, samples, depth, denoiser, device in sorted(normalized)
-+    ]
++    descriptions = []
++    for shader, pipeline, samples, depth, denoiser, device in sorted(normalized):
++        if pipeline == "raster":
++            descriptions.append(f"{shader} raster, device {device}")
++        else:
++            descriptions.append(
++                f"{shader} {pipeline}, {samples} spp, depth {depth}, "
++                f"denoiser {denoiser}, device {device}"
++            )
 +    label = "Renderer receipt" if len(descriptions) == 1 else "Renderer receipts"
 +    return (
 +        f"- {label}: {'; '.join(descriptions)}. Official GPU rendering uses OIDN; "
@@ -9287,10 +9311,10 @@ index 0000000..d2a44d1
 +    assert torch.equal(video_expert.post_tokens, torch.full((1, 2, 4), 7.0))
 diff --git a/tests/test_rmbench_launchers.py b/tests/test_rmbench_launchers.py
 new file mode 100644
-index 0000000..d1c2fb5
+index 0000000..2d2535d
 --- /dev/null
 +++ b/tests/test_rmbench_launchers.py
-@@ -0,0 +1,157 @@
+@@ -0,0 +1,174 @@
 +import json
 +import sys
 +import zipfile
@@ -9424,15 +9448,32 @@ index 0000000..d1c2fb5
 +        "camera_config_in_observation": False,
 +        "renderer": {
 +            "shader": "rt",
++            "pipeline": "ray_tracing",
 +            "samples_per_pixel": 1,
 +            "path_depth": 1,
 +            "denoiser": "none",
 +        },
 +    }
 +
++    raster = _progress_protocol_from_environment(
++        {
++            "RMBENCH_OBSERVATION_STRIDE": "4",
++            "RMBENCH_SKIP_CAMERA_CONFIG": "1",
++            "RMBENCH_RENDER_SHADER": "default",
++        }
++    )
++    assert raster["renderer"] == {
++        "shader": "default",
++        "pipeline": "raster",
++        "samples_per_pixel": None,
++        "path_depth": None,
++        "denoiser": None,
++    }
++
 +
 +def test_eval_shell_caps_cpu_thread_pools():
 +    script = (SCRIPT_DIR / "eval_rmbench_helios.sh").read_text(encoding="utf-8")
++    assert 'RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-default}"' in script
 +    for variable in (
 +        "LP_NUM_THREADS",
 +        "OMP_NUM_THREADS",
@@ -9653,10 +9694,10 @@ index 0000000..1259648
 +    ).tolist() == [0] * 11
 diff --git a/tests/test_rmbench_results.py b/tests/test_rmbench_results.py
 new file mode 100644
-index 0000000..fb3d4a6
+index 0000000..735dc12
 --- /dev/null
 +++ b/tests/test_rmbench_results.py
-@@ -0,0 +1,139 @@
+@@ -0,0 +1,157 @@
 +import json
 +import sys
 +import zipfile
@@ -9704,6 +9745,7 @@ index 0000000..fb3d4a6
 +        "camera_config_in_observation": False,
 +        "renderer": {
 +            "shader": "rt",
++            "pipeline": "ray_tracing",
 +            "samples_per_pixel": 1,
 +            "path_depth": 1,
 +            "denoiser": "none",
@@ -9778,6 +9820,7 @@ index 0000000..fb3d4a6
 +        {
 +            "press_button": {
 +                "shader": "rt",
++                "pipeline": "ray_tracing",
 +                "samples_per_pixel": 1,
 +                "path_depth": 1,
 +                "denoiser": "none",
@@ -9785,6 +9828,7 @@ index 0000000..fb3d4a6
 +            },
 +            "swap_T": {
 +                "shader": "rt",
++                "pipeline": "ray_tracing",
 +                "samples_per_pixel": 1,
 +                "path_depth": 1,
 +                "denoiser": "none",
@@ -9796,6 +9840,21 @@ index 0000000..fb3d4a6
 +    assert "1 spp, depth 1" in note
 +    assert "Mesa lavapipe (CPU)" in note
 +    assert "32 spp" not in note
++
++    raster_note = _renderer_note(
++        {
++            "cover_blocks": {
++                "shader": "default",
++                "pipeline": "raster",
++                "samples_per_pixel": None,
++                "path_depth": None,
++                "denoiser": None,
++                "vulkan_device": "Mesa lavapipe (CPU)",
++            }
++        }
++    )
++    assert "default raster" in raster_note
++    assert "None spp" not in raster_note
 diff --git a/tests/test_samplers.py b/tests/test_samplers.py
 new file mode 100644
 index 0000000..8d00b57

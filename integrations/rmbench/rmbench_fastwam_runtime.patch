@@ -1,5 +1,5 @@
 diff --git a/envs/_base_task.py b/envs/_base_task.py
-index e0ea0d8..4bea7ed 100644
+index e0ea0d8..efdb780 100644
 --- a/envs/_base_task.py
 +++ b/envs/_base_task.py
 @@ -1,4 +1,5 @@
@@ -40,7 +40,7 @@ index e0ea0d8..4bea7ed 100644
  class Base_Task(gym.Env):
  
      def __init__(self):
-@@ -217,10 +236,20 @@ class Base_Task(gym.Env):
+@@ -217,10 +236,22 @@ class Base_Task(gym.Env):
          # give renderer to sapien sim
          self.engine.set_renderer(self.renderer)
  
@@ -48,7 +48,9 @@ index e0ea0d8..4bea7ed 100644
 -        sapien.render.set_ray_tracing_samples_per_pixel(32)
 -        sapien.render.set_ray_tracing_path_depth(8)
 -        sapien.render.set_ray_tracing_denoiser("oidn")
-+        render_shader = os.environ.get("RMBENCH_RENDER_SHADER", "rt")
++        render_shader = os.environ.get("RMBENCH_RENDER_SHADER", "default").strip()
++        if not render_shader:
++            raise ValueError("RMBENCH_RENDER_SHADER must not be empty")
 +        sapien.render.set_camera_shader_dir(render_shader)
 +        if render_shader == "rt":
 +            ray_tracing_samples = int(os.environ.get("RMBENCH_RT_SAMPLES", "32"))
@@ -65,7 +67,7 @@ index e0ea0d8..4bea7ed 100644
  
          # declare sapien scene
          scene_config = sapien.SceneConfig()
-@@ -446,6 +475,10 @@ class Base_Task(gym.Env):
+@@ -446,6 +477,10 @@ class Base_Task(gym.Env):
      # =========================================================== Basic APIs ===========================================================
  
      def get_obs(self):
@@ -76,7 +78,7 @@ index e0ea0d8..4bea7ed 100644
          self._update_render()
          self.cameras.update_picture()
          pkl_dic = {
-@@ -455,12 +488,26 @@ class Base_Task(gym.Env):
+@@ -455,12 +490,26 @@ class Base_Task(gym.Env):
              "endpose": {},
          }
  
@@ -105,7 +107,7 @@ index e0ea0d8..4bea7ed 100644
  
          if self.data_type.get("third_view", False):
              third_view_rgb = self.cameras.get_third_view_rgb()
-@@ -469,17 +516,23 @@ class Base_Task(gym.Env):
+@@ -469,17 +518,23 @@ class Base_Task(gym.Env):
          if self.data_type.get("mesh_segmentation", False):
              mesh_segmentation = self.cameras.get_segmentation(level="mesh")
              for camera_name in mesh_segmentation.keys():
@@ -132,7 +134,7 @@ index e0ea0d8..4bea7ed 100644
          # endpose
          if self.data_type.get("endpose", False):
              if not self.is_dual_arm:
-@@ -520,9 +573,10 @@ class Base_Task(gym.Env):
+@@ -520,9 +575,10 @@ class Base_Task(gym.Env):
          return pkl_dic
  
      def save_camera_rgb(self, save_path, camera_name='head_camera'):
@@ -174,7 +176,7 @@ index fef2344..5bd25cc 100644
          if not self.communication_flag:
              self.left_planner = CuroboPlanner(self.left_entity_origion_pose,
 diff --git a/script/eval_policy_client.py b/script/eval_policy_client.py
-index 22e418a..2c7ffd4 100644
+index 22e418a..fb9ef07 100644
 --- a/script/eval_policy_client.py
 +++ b/script/eval_policy_client.py
 @@ -2,6 +2,23 @@ import sys
@@ -201,7 +203,7 @@ index 22e418a..2c7ffd4 100644
  sys.path.append("./")
  sys.path.append(f"./policy")
  sys.path.append("./description/utils")
-@@ -50,6 +67,43 @@ import json
+@@ -50,6 +67,70 @@ import json
  from typing import Any
  import base64
  
@@ -242,10 +244,37 @@ index 22e418a..2c7ffd4 100644
 +    os.replace(temporary, path)
 +
 +
++def _renderer_protocol_from_environment():
++    shader = os.environ.get("RMBENCH_RENDER_SHADER", "default").strip()
++    if not shader:
++        raise ValueError("RMBENCH_RENDER_SHADER must not be empty")
++    if shader == "rt":
++        samples = int(os.environ.get("RMBENCH_RT_SAMPLES", "32"))
++        path_depth = int(os.environ.get("RMBENCH_RT_PATH_DEPTH", "8"))
++        if samples <= 0 or path_depth <= 0:
++            raise ValueError(
++                "RMBENCH_RT_SAMPLES and RMBENCH_RT_PATH_DEPTH must be positive"
++            )
++        return {
++            "shader": shader,
++            "pipeline": "ray_tracing",
++            "samples_per_pixel": samples,
++            "path_depth": path_depth,
++            "denoiser": os.environ.get("RMBENCH_RT_DENOISER", "none"),
++        }
++    return {
++        "shader": shader,
++        "pipeline": "raster",
++        "samples_per_pixel": None,
++        "path_depth": None,
++        "denoiser": None,
++    }
++
++
  class NumpyEncoder(json.JSONEncoder):
      """Enhanced json encoder for numpy types with array reconstruction info"""
      def default(self, obj):
-@@ -131,7 +185,7 @@ def get_embodiment_config(robot_file):
+@@ -131,7 +212,7 @@ def get_embodiment_config(robot_file):
      return embodiment_args
  
  class ModelClient:
@@ -254,7 +283,7 @@ index 22e418a..2c7ffd4 100644
          self.host = host
          self.port = port
          self.timeout = timeout
-@@ -326,7 +380,38 @@ def main(usr_args):
+@@ -326,7 +407,29 @@ def main(usr_args):
  
      st_seed = 100000 * (1 + seed)
      suc_nums = []
@@ -279,22 +308,13 @@ index 22e418a..2c7ffd4 100644
 +                "RMBENCH_SKIP_CAMERA_CONFIG", "0"
 +            ).strip().lower()
 +            not in {"1", "true", "yes"},
-+            "renderer": {
-+                "shader": os.environ.get("RMBENCH_RENDER_SHADER", "rt"),
-+                "samples_per_pixel": int(
-+                    os.environ.get("RMBENCH_RT_SAMPLES", "32")
-+                ),
-+                "path_depth": int(
-+                    os.environ.get("RMBENCH_RT_PATH_DEPTH", "8")
-+                ),
-+                "denoiser": os.environ.get("RMBENCH_RT_DENOISER", "none"),
-+            },
++            "renderer": _renderer_protocol_from_environment(),
 +        },
 +    }
      topk = 1
  
      # model = get_model(usr_args)
-@@ -339,7 +424,9 @@ def main(usr_args):
+@@ -339,7 +442,9 @@ def main(usr_args):
                                     test_num=test_num,
                                     video_size=video_size,
                                     instruction_type=instruction_type,
@@ -305,7 +325,7 @@ index 22e418a..2c7ffd4 100644
      suc_nums.append(suc_num)
  
      topk_success_rate = sorted(suc_nums, reverse=True)[:topk]
-@@ -363,7 +450,9 @@ def eval_policy(task_name,
+@@ -363,7 +468,9 @@ def eval_policy(task_name,
                  test_num=100,
                  video_size=None,
                  instruction_type=None,
@@ -316,7 +336,7 @@ index 22e418a..2c7ffd4 100644
      print(f"\033[34mTask Name: {args['task_name']}\033[0m")
      print(f"\033[34mPolicy Name: {args['policy_name']}\033[0m")
  
-@@ -381,9 +470,26 @@ def eval_policy(task_name,
+@@ -381,9 +488,26 @@ def eval_policy(task_name,
      now_seed = st_seed
      task_total_reward = 0
      clear_cache_freq = args["clear_cache_freq"]
@@ -343,7 +363,7 @@ index 22e418a..2c7ffd4 100644
      while succ_seed < test_num:
          render_freq = args["render_freq"]
          args["render_freq"] = 0
-@@ -393,6 +499,7 @@ def eval_policy(task_name,
+@@ -393,6 +517,7 @@ def eval_policy(task_name,
                  TASK_ENV.setup_demo(now_ep_num=now_id, seed=now_seed, is_test=True, **args)
                  episode_info = TASK_ENV.play_once()
                  TASK_ENV.close_env()
@@ -351,7 +371,7 @@ index 22e418a..2c7ffd4 100644
              except UnStableError as e:
                  print(" -------------")
                  print("Error: ", e)
-@@ -402,6 +509,7 @@ def eval_policy(task_name,
+@@ -402,6 +527,7 @@ def eval_policy(task_name,
                  args["render_freq"] = render_freq
                  continue
              except Exception as e:
@@ -359,7 +379,7 @@ index 22e418a..2c7ffd4 100644
                  stack_trace = traceback.format_exc()
                  print(" -------------")
                  print("Error: ", stack_trace)
-@@ -409,7 +517,14 @@ def eval_policy(task_name,
+@@ -409,7 +535,14 @@ def eval_policy(task_name,
                  TASK_ENV.close_env()
                  now_seed += 1
                  args["render_freq"] = render_freq
@@ -375,7 +395,7 @@ index 22e418a..2c7ffd4 100644
                  continue
  
          if (not expert_check) or (TASK_ENV.plan_success and TASK_ENV.check_success()):
-@@ -489,6 +604,16 @@ def eval_policy(task_name,
+@@ -489,6 +622,16 @@ def eval_policy(task_name,
          )
          # TASK_ENV._take_picture()
          now_seed += 1
