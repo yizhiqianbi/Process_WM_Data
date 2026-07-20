@@ -10,7 +10,7 @@ It contains no model weights, datasets, caches, or credentials.
 Current patch SHA256:
 
 ```text
-0f7c8b2bbdd82f8baf9364091f7a938b3bf7f32a702476083f138dc338b8d161
+ec35f73602aaaa0f274077e10cd680cc9b9de2e5c9faa6a9ec07040815363504
 ```
 
 The patch is pinned to upstream FastWAM commit:
@@ -38,7 +38,7 @@ cd /path/to/FastWAM
 python -m pytest -q
 ```
 
-The connected checkout result is 45 passed tests. The suite includes the inference contract that
+The connected checkout result is 47 passed tests. The suite includes the inference contract that
 keeps canonical padded action dimensions zero throughout flow-matching denoising, optional
 fisheye-to-pinhole mapping, synchronized imagination/GT pair dimensions, DDP-safe wrapped model
 forward, complete ordered merging of rank-sharded fixed probes, and RMBench data/memory/result

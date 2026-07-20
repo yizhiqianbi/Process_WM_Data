@@ -3547,10 +3547,10 @@ index 0000000..302a0ce
 +  enabled: false
 diff --git a/docs/RMBENCH_HELIOS.md b/docs/RMBENCH_HELIOS.md
 new file mode 100644
-index 0000000..3e11d3f
+index 0000000..d0e22e5
 --- /dev/null
 +++ b/docs/RMBENCH_HELIOS.md
-@@ -0,0 +1,159 @@
+@@ -0,0 +1,158 @@
 +# RMBench Helios MemoryFastWAM
 +
 +This integration trains the local Helios-style FastWAM memory architecture directly from the official RMBench `demo_clean` HDF5 files and evaluates it with the official closed-loop simulator protocol.
@@ -3643,7 +3643,7 @@ index 0000000..3e11d3f
 +
 +The simulator and model run in separate environments because RMBench pins PyTorch 2.4.1 while FastWAM uses PyTorch 2.7.1. The H200 compute devices on this node do not expose Vulkan graphics queues to SAPIEN. `eval_rmbench_helios.sh` therefore renders through Mesa 26.1.5 lavapipe on CPU while CuRobo and FastWAM remain on the assigned CUDA device. The Helios evaluation wrapper defaults to SAPIEN's `default` raster camera shader. Mesa's CPU `rt` path remains selectable, but repeated native camera crashes make it unsuitable for the 9 x 100 local suite. OIDN also cannot be used because its CUDA interop requires the Vulkan render device to be CUDA-visible.
 +
-+Multiple SAPIEN clients can otherwise fail inside Mesa's native camera calls. The launcher gives every slot a separate XDG/tmp/shader-cache directory, limits lavapipe to one worker thread, and serializes each complete `update_render -> take_picture -> get_picture` observation transaction with a host-level file lock. FastWAM does not consume camera calibration matrices, so the evaluation path also skips those native matrix reads while preserving all three RGB images, qpos, and camera layout.
++Multiple SAPIEN RT clients can otherwise fail inside Mesa's native camera calls. The launcher gives every slot a separate XDG/tmp/shader-cache directory and limits lavapipe to one worker thread. The stable raster protocol leaves the cross-process render lock empty so all eight simulator/model pairs make progress concurrently. Selecting `RMBENCH_RENDER_SHADER=rt` enables the host-level lock by default around each complete `update_render -> take_picture -> get_picture` transaction, and callers can explicitly override the lock path. FastWAM does not consume camera calibration matrices, so the evaluation path also skips those native matrix reads while preserving all three RGB images, qpos, and camera layout.
 +
 +RMBench's bundled CuRobo v0.7.8 uses the legacy `wp.torch` namespace. Install
 +`scripts/rmbench/requirements-eval-compat.txt` in the RMBench environment; it pins
@@ -3673,7 +3673,6 @@ index 0000000..3e11d3f
 +
 +```bash
 +RMBENCH_RENDER_SHADER=default \
-+RMBENCH_RENDER_LOCK_PATH=/tmp/rmbench-lavapipe-render-$UID.lock \
 +RMBENCH_LP_NUM_THREADS=1 \
 +RMBENCH_SKIP_CAMERA_CONFIG=1 \
 +RMBENCH_OBSERVATION_STRIDE=4 \
@@ -3846,10 +3845,10 @@ index 0000000..ad1dc87
 +    main()
 diff --git a/scripts/rmbench/eval_rmbench_helios.sh b/scripts/rmbench/eval_rmbench_helios.sh
 new file mode 100755
-index 0000000..f09fe92
+index 0000000..a1e6265
 --- /dev/null
 +++ b/scripts/rmbench/eval_rmbench_helios.sh
-@@ -0,0 +1,144 @@
+@@ -0,0 +1,151 @@
 +#!/usr/bin/env bash
 +set -euo pipefail
 +
@@ -3902,7 +3901,14 @@ index 0000000..f09fe92
 +XDG_CACHE_HOME="${RMBENCH_XDG_CACHE_HOME:-${XDG_RUNTIME_DIR}/cache}"
 +TMPDIR="${RMBENCH_TMPDIR:-${XDG_RUNTIME_DIR}/tmp}"
 +MESA_SHADER_CACHE_DIR="${RMBENCH_MESA_SHADER_CACHE_DIR:-${XDG_CACHE_HOME}/mesa}"
-+RMBENCH_RENDER_LOCK_PATH="${RMBENCH_RENDER_LOCK_PATH:-/tmp/rmbench-lavapipe-render-${UID}.lock}"
++RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-default}"
++if [[ -z "${RMBENCH_RENDER_LOCK_PATH+x}" ]]; then
++  if [[ "${RMBENCH_RENDER_SHADER}" == "rt" ]]; then
++    RMBENCH_RENDER_LOCK_PATH="/tmp/rmbench-lavapipe-render-${UID}.lock"
++  else
++    RMBENCH_RENDER_LOCK_PATH=""
++  fi
++fi
 +
 +mkdir -p "$(dirname "${SERVER_LOG}")"
 +mkdir -p "${XDG_RUNTIME_DIR}"
@@ -3936,7 +3942,7 @@ index 0000000..f09fe92
 +export OMP_WAIT_POLICY=PASSIVE
 +export MALLOC_ARENA_MAX="${RMBENCH_MALLOC_ARENA_MAX:-4}"
 +export PYTHONFAULTHANDLER=1
-+export RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-default}"
++export RMBENCH_RENDER_SHADER
 +export RMBENCH_RT_SAMPLES="${RMBENCH_RT_SAMPLES:-32}"
 +export RMBENCH_RT_PATH_DEPTH="${RMBENCH_RT_PATH_DEPTH:-8}"
 +export RMBENCH_RT_DENOISER="${RMBENCH_RT_DENOISER:-none}"
@@ -3996,10 +4002,10 @@ index 0000000..f09fe92
 +  2>&1 | tee "${CLIENT_LOG}"
 diff --git a/scripts/rmbench/launch_rmbench_helios_evaluation.py b/scripts/rmbench/launch_rmbench_helios_evaluation.py
 new file mode 100755
-index 0000000..4be1c89
+index 0000000..f611171
 --- /dev/null
 +++ b/scripts/rmbench/launch_rmbench_helios_evaluation.py
-@@ -0,0 +1,372 @@
+@@ -0,0 +1,382 @@
 +#!/usr/bin/env python3
 +"""Run official RMBench evaluations with one task bound to each GPU."""
 +
@@ -4113,6 +4119,17 @@ index 0000000..4be1c89
 +    }
 +
 +
++def _render_lock_path_from_environment(
++    environment: Mapping[str, str] | None = None,
++) -> str | None:
++    values = os.environ if environment is None else environment
++    if "RMBENCH_RENDER_LOCK_PATH" in values:
++        return values["RMBENCH_RENDER_LOCK_PATH"].strip() or None
++    if values.get("RMBENCH_RENDER_SHADER", "default").strip() == "rt":
++        return f"/tmp/rmbench-lavapipe-render-{os.getuid()}.lock"
++    return None
++
++
 +def main() -> None:
 +    parser = argparse.ArgumentParser()
 +    parser.add_argument("--gpus", default="0,1,2,3,4,5,6,7")
@@ -4165,6 +4182,7 @@ index 0000000..4be1c89
 +    root = args.root.expanduser().resolve()
 +    rmbench_root = args.rmbench_root.expanduser().resolve()
 +    progress_protocol = _progress_protocol_from_environment()
++    render_lock_path = _render_lock_path_from_environment()
 +    script = Path(__file__).with_name("eval_rmbench_helios.sh").resolve()
 +    receipt_dir = root / "evaluation" / "receipts"
 +    log_dir = root / "evaluation" / "launch_logs"
@@ -4337,9 +4355,7 @@ index 0000000..4be1c89
 +                    "renderer": {
 +                        **progress_protocol["renderer"],
 +                        "vulkan_device": "Mesa lavapipe (CPU)",
-+                        "interprocess_lock_path": os.environ.get(
-+                            "RMBENCH_RENDER_LOCK_PATH"
-+                        ),
++                        "interprocess_lock_path": render_lock_path,
 +                    },
 +                },
 +            }
@@ -6163,10 +6179,10 @@ index 0000000..0207c6b
 +                pass
 diff --git a/src/fastwam/datasets/training_case_dataset.py b/src/fastwam/datasets/training_case_dataset.py
 new file mode 100644
-index 0000000..7c5fc0b
+index 0000000..606886b
 --- /dev/null
 +++ b/src/fastwam/datasets/training_case_dataset.py
-@@ -0,0 +1,1195 @@
+@@ -0,0 +1,1249 @@
 +import hashlib
 +import io
 +import json
@@ -6218,12 +6234,12 @@ index 0000000..7c5fc0b
 +    calibration_status: str
 +    image_size: tuple[int, int]
 +    camera_matrix: tuple[tuple[float, float, float], ...]
-+    distortion_coefficients: tuple[float, float, float, float]
++    distortion_coefficients: tuple[float, ...]
 +    virtual_horizontal_fov_degrees: float
 +
 +
 +class CameraRectificationRegistry:
-+    """Resolve and apply deterministic fisheye-to-pinhole camera projections."""
++    """Resolve and apply deterministic calibrated camera-to-pinhole projections."""
 +
 +    def __init__(self, path: str | os.PathLike[str]):
 +        self.path = Path(path).expanduser().resolve(strict=True)
@@ -6308,7 +6324,7 @@ index 0000000..7c5fc0b
 +        if not isinstance(raw, dict):
 +            raise ValueError(f"Camera rectification profile {profile_id!r} must be an object.")
 +        model = str(raw.get("model", "")).strip().lower()
-+        if model != "opencv_fisheye":
++        if model not in {"opencv_fisheye", "opencv_pinhole_rational"}:
 +            raise ValueError(
 +                f"Camera rectification profile {profile_id!r} uses unsupported model {model!r}."
 +            )
@@ -6335,9 +6351,11 @@ index 0000000..7c5fc0b
 +                f"Camera rectification profile {profile_id!r} skew is not supported."
 +            )
 +        distortion = tuple(float(value) for value in raw.get("distortion_coefficients", ()))
-+        if len(distortion) != 4 or not np.isfinite(distortion).all():
++        expected_distortion_count = 4 if model == "opencv_fisheye" else 8
++        if len(distortion) != expected_distortion_count or not np.isfinite(distortion).all():
 +            raise ValueError(
-+                f"Camera rectification profile {profile_id!r} distortion_coefficients must have 4 finite values."
++                f"Camera rectification profile {profile_id!r} with model {model!r} must have "
++                f"{expected_distortion_count} finite distortion coefficients."
 +            )
 +        virtual = raw.get("virtual_camera") or {}
 +        horizontal_fov = float(virtual.get("horizontal_fov_degrees", 0.0))
@@ -6419,24 +6437,40 @@ index 0000000..7c5fc0b
 +        )
 +        x = (xx - virtual_cx) / float(virtual_fx)
 +        y = (yy - virtual_cy) / float(virtual_fy)
-+        radius = torch.sqrt(x.square() + y.square())
-+        theta = torch.atan(radius)
-+        theta2 = theta.square()
-+        k1, k2, k3, k4 = profile.distortion_coefficients
-+        theta_distorted = theta * (
-+            1.0
-+            + k1 * theta2
-+            + k2 * theta2.square()
-+            + k3 * theta2.pow(3)
-+            + k4 * theta2.pow(4)
-+        )
-+        scale = torch.where(
-+            radius > 1.0e-8,
-+            theta_distorted / radius.clamp_min(1.0e-8),
-+            torch.ones_like(radius),
-+        )
-+        source_x = float(source_fx) * x * scale + float(source_cx)
-+        source_y = float(source_fy) * y * scale + float(source_cy)
++        if profile.model == "opencv_fisheye":
++            radius = torch.sqrt(x.square() + y.square())
++            theta = torch.atan(radius)
++            theta2 = theta.square()
++            k1, k2, k3, k4 = profile.distortion_coefficients
++            theta_distorted = theta * (
++                1.0
++                + k1 * theta2
++                + k2 * theta2.square()
++                + k3 * theta2.pow(3)
++                + k4 * theta2.pow(4)
++            )
++            scale = torch.where(
++                radius > 1.0e-8,
++                theta_distorted / radius.clamp_min(1.0e-8),
++                torch.ones_like(radius),
++            )
++            distorted_x = x * scale
++            distorted_y = y * scale
++        else:
++            # OpenCV's pinhole rational model: [k1, k2, p1, p2, k3, k4, k5, k6].
++            # The dataset stores an image resized from the calibration resolution, so
++            # K is already scaled to the decoded source frame before this mapping.
++            k1, k2, p1, p2, k3, k4, k5, k6 = profile.distortion_coefficients
++            radius2 = x.square() + y.square()
++            radial = (
++                1.0 + k1 * radius2 + k2 * radius2.square() + k3 * radius2.pow(3)
++            ) / (
++                1.0 + k4 * radius2 + k5 * radius2.square() + k6 * radius2.pow(3)
++            )
++            distorted_x = x * radial + 2.0 * p1 * x * y + p2 * (radius2 + 2.0 * x.square())
++            distorted_y = y * radial + p1 * (radius2 + 2.0 * y.square()) + 2.0 * p2 * x * y
++        source_x = float(source_fx) * distorted_x + float(source_cx)
++        source_y = float(source_fy) * distorted_y + float(source_cy)
 +        grid_x = source_x.mul(2.0 / float(source_width - 1)).sub(1.0)
 +        grid_y = source_y.mul(2.0 / float(source_height - 1)).sub(1.0)
 +        grid = torch.stack([grid_x, grid_y], dim=-1).unsqueeze(0).contiguous()
@@ -6806,10 +6840,14 @@ index 0000000..7c5fc0b
 +            raise ValueError(f"video_size must be [height, width], got {self.video_size}")
 +        if self.video_size[0] % 16 or self.video_size[1] % 16:
 +            raise ValueError(f"FastWAM video_size must use multiples of 16, got {self.video_size}")
-+        if self.camera_roles != ("global_primary", "left_wrist", "right_wrist"):
++        supported_camera_layouts = {
++            ("global_primary", "left_wrist", "right_wrist"),
++            ("global_primary", "global_secondary", "left_wrist", "right_wrist"),
++        }
++        if self.camera_roles not in supported_camera_layouts:
 +            raise ValueError(
-+                "The canonical FastWAM composite currently requires camera_roles="
-+                "[global_primary,left_wrist,right_wrist]."
++                "The canonical FastWAM composite requires camera_roles=[global_primary,left_wrist,right_wrist] "
++                "or [global_primary,global_secondary,left_wrist,right_wrist]."
 +            )
 +        if self.missing_camera_policy not in {"zero", "repeat_global"}:
 +            raise ValueError(
@@ -7106,7 +7144,15 @@ index 0000000..7c5fc0b
 +        if global_camera is None:
 +            raise ValueError(f"No valid global camera for case_id={case['case_id']}")
 +
-+        selected = [global_camera, cameras.get("left_wrist"), cameras.get("right_wrist")]
++        if len(self.camera_roles) == 4:
++            selected = [
++                global_camera,
++                cameras.get("global_secondary") or cameras.get("auxiliary"),
++                cameras.get("left_wrist"),
++                cameras.get("right_wrist"),
++            ]
++        else:
++            selected = [global_camera, cameras.get("left_wrist"), cameras.get("right_wrist")]
 +        present = torch.tensor([camera is not None for camera in selected], dtype=torch.bool)
 +        decoded: dict[str, torch.Tensor] = {}
 +        for camera in selected:
@@ -7157,10 +7203,36 @@ index 0000000..7c5fc0b
 +                False,
 +            )
 +
-+        top, top_rectified = prepare(selected[0], (256, 320))
-+        left, left_rectified = prepare(selected[1], (128, 160))
-+        right, right_rectified = prepare(selected[2], (128, 160))
-+        composite = torch.cat([top, torch.cat([left, right], dim=-1)], dim=-2)
++        if len(selected) == 4:
++            if self.video_size[0] % 2 or self.video_size[1] % 2:
++                raise ValueError(
++                    "Four-camera FastWAM composites require an even video_size, got "
++                    f"{self.video_size}."
++                )
++            panel_size = (self.video_size[0] // 2, self.video_size[1] // 2)
++            global_primary, primary_rectified = prepare(selected[0], panel_size)
++            global_secondary, secondary_rectified = prepare(selected[1], panel_size)
++            left_wrist, left_rectified = prepare(selected[2], panel_size)
++            right_wrist, right_rectified = prepare(selected[3], panel_size)
++            composite = torch.cat(
++                [
++                    torch.cat([global_primary, global_secondary], dim=-1),
++                    torch.cat([left_wrist, right_wrist], dim=-1),
++                ],
++                dim=-2,
++            )
++            rectified_flags = [
++                primary_rectified,
++                secondary_rectified,
++                left_rectified,
++                right_rectified,
++            ]
++        else:
++            top, top_rectified = prepare(selected[0], (256, 320))
++            left, left_rectified = prepare(selected[1], (128, 160))
++            right, right_rectified = prepare(selected[2], (128, 160))
++            composite = torch.cat([top, torch.cat([left, right], dim=-1)], dim=-2)
++            rectified_flags = [top_rectified, left_rectified, right_rectified]
 +        if tuple(composite.shape[-2:]) != self.video_size:
 +            composite = transforms_F.resize(
 +                composite,
@@ -7169,9 +7241,7 @@ index 0000000..7c5fc0b
 +                antialias=True,
 +            )
 +        video = composite.mul(2.0).sub(1.0).permute(1, 0, 2, 3).contiguous()
-+        rectified = torch.tensor(
-+            [top_rectified, left_rectified, right_rectified], dtype=torch.bool
-+        )
++        rectified = torch.tensor(rectified_flags, dtype=torch.bool)
 +        return video, present, rectified
 +
 +    def _get_cached_text_context(self, prompt: str) -> tuple[torch.Tensor, torch.Tensor]:
@@ -9311,11 +9381,12 @@ index 0000000..d2a44d1
 +    assert torch.equal(video_expert.post_tokens, torch.full((1, 2, 4), 7.0))
 diff --git a/tests/test_rmbench_launchers.py b/tests/test_rmbench_launchers.py
 new file mode 100644
-index 0000000..2d2535d
+index 0000000..450d323
 --- /dev/null
 +++ b/tests/test_rmbench_launchers.py
-@@ -0,0 +1,174 @@
+@@ -0,0 +1,190 @@
 +import json
++import os
 +import sys
 +import zipfile
 +from pathlib import Path
@@ -9337,6 +9408,7 @@ index 0000000..2d2535d
 +    _checkpoint,
 +    _port_for_slot,
 +    _progress_protocol_from_environment,
++    _render_lock_path_from_environment,
 +    _should_retry,
 +)
 +
@@ -9469,11 +9541,25 @@ index 0000000..2d2535d
 +        "path_depth": None,
 +        "denoiser": None,
 +    }
++    assert _render_lock_path_from_environment(
++        {"RMBENCH_RENDER_SHADER": "default"}
++    ) is None
++    assert _render_lock_path_from_environment(
++        {
++            "RMBENCH_RENDER_SHADER": "rt",
++            "RMBENCH_RENDER_LOCK_PATH": "",
++        }
++    ) is None
++    assert _render_lock_path_from_environment(
++        {"RMBENCH_RENDER_SHADER": "rt"}
++    ) == f"/tmp/rmbench-lavapipe-render-{os.getuid()}.lock"
 +
 +
 +def test_eval_shell_caps_cpu_thread_pools():
 +    script = (SCRIPT_DIR / "eval_rmbench_helios.sh").read_text(encoding="utf-8")
 +    assert 'RMBENCH_RENDER_SHADER="${RMBENCH_RENDER_SHADER:-default}"' in script
++    assert 'if [[ "${RMBENCH_RENDER_SHADER}" == "rt" ]]' in script
++    assert 'RMBENCH_RENDER_LOCK_PATH=""' in script
 +    for variable in (
 +        "LP_NUM_THREADS",
 +        "OMP_NUM_THREADS",
@@ -9924,10 +10010,10 @@ index 0000000..8d00b57
 +    assert list(sampler) == full_epoch[4:]
 diff --git a/tests/test_training_case_io.py b/tests/test_training_case_io.py
 new file mode 100644
-index 0000000..cd3684d
+index 0000000..c3e3cf3
 --- /dev/null
 +++ b/tests/test_training_case_io.py
-@@ -0,0 +1,150 @@
+@@ -0,0 +1,223 @@
 +import io
 +import json
 +from pathlib import Path
@@ -9936,6 +10022,8 @@ index 0000000..cd3684d
 +
 +import pytest
 +import torch
++
++import fastwam.datasets.training_case_dataset as training_case_dataset
 +
 +from fastwam.datasets.training_case_dataset import (
 +    CameraRectificationRegistry,
@@ -10065,6 +10153,77 @@ index 0000000..cd3684d
 +
 +    assert not applied
 +    assert tuple(resized.shape) == (1, 3, 5, 7)
++
++
++def test_camera_rectification_supports_opencv_pinhole_rational_model(tmp_path):
++    config = tmp_path / "rational.json"
++    payload = {
++        "schema_version": "fastwam-camera-rectification-v1",
++        "profiles": {
++            "test": {
++                "model": "opencv_pinhole_rational",
++                "calibration_status": "synthetic_test",
++                "image_size": [21, 21],
++                "camera_matrix": [[10.0, 0.0, 10.0], [0.0, 10.0, 10.0], [0.0, 0.0, 1.0]],
++                "distortion_coefficients": [1.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0, 0.0],
++                "virtual_camera": {"horizontal_fov_degrees": 90.0},
++            }
++        },
++        "bindings": {"source_key": {"camera.test": "test"}, "role": {}},
++        "unmatched_policy": "error",
++    }
++    config.write_text(json.dumps(payload), encoding="utf-8")
++    registry = CameraRectificationRegistry(config)
++
++    grid = registry._build_grid(registry.profiles["test"], source_size=(21, 21), output_size=(3, 3))
++
++    # At x=2, y=1: x_norm=2/3 and k1=1 gives x_dist=x*(1+x^2).
++    expected_source_x = 10.0 + 10.0 * (2.0 / 3.0) * (1.0 + (2.0 / 3.0) ** 2)
++    assert grid[0, 1, 2, 0].item() == pytest.approx(expected_source_x / 10.0 - 1.0)
++    assert registry.metadata["profiles"]["test"]["model"] == "opencv_pinhole_rational"
++
++
++def test_four_camera_composite_keeps_all_views_in_a_2x2_layout(monkeypatch):
++    dataset = object.__new__(TrainingCaseDataset)
++    dataset.camera_roles = (
++        "global_primary",
++        "global_secondary",
++        "left_wrist",
++        "right_wrist",
++    )
++    dataset.video_size = (384, 320)
++    dataset.missing_camera_policy = "zero"
++    dataset.camera_rectification = None
++    dataset.tar_member_cache_dir = None
++    dataset._resolve_video_uri = lambda value: value
++    values = {"global_primary": 10, "global_secondary": 20, "left_wrist": 30, "right_wrist": 40}
++
++    def fake_decode(uri, source_indices, **kwargs):
++        value = values[uri]
++        return torch.full((len(source_indices), 4, 4, 3), value, dtype=torch.uint8)
++
++    monkeypatch.setattr(training_case_dataset, "decode_video_frames", fake_decode)
++    case = {
++        "inputs": {
++            "camera_slots": [
++                {"role": role, "valid": True, "source_uri": role, "source_key": role}
++                for role in values
++            ]
++        }
++    }
++
++    video, present, rectified = dataset._compose_video(case, [0, 1])
++
++    assert tuple(video.shape) == (3, 2, 384, 320)
++    assert present.tolist() == [True, True, True, True]
++    assert rectified.tolist() == [False, False, False, False]
++    restored = ((video[:, 0] + 1.0) * 127.5).round().to(torch.uint8)
++    assert [
++        int(restored[0, 0, 0]),
++        int(restored[0, 0, 319]),
++        int(restored[0, 383, 0]),
++        int(restored[0, 383, 319]),
++    ] == [10, 20, 30, 40]
 +
 +
 +def test_camera_rectification_rejects_source_size_mismatch(tmp_path):

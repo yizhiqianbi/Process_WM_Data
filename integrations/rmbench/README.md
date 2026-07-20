@@ -32,9 +32,9 @@ It adds the following runtime contracts:
   silently counted as policy failures.
 - Explicit torch intra-op/inter-op limits before importing the simulator or
   model-server dependency graph.
-- A host-level file lock around each complete SAPIEN observation-rendering
-  transaction, preventing concurrent lavapipe `get_picture` native crashes
-  while preserving multi-GPU model execution.
+- An optional host-level file lock around each complete SAPIEN
+  observation-rendering transaction for the unstable CPU ray-tracing path;
+  the raster protocol leaves it disabled for concurrent simulator progress.
 - An evaluation-only switch to omit unused camera calibration matrices from
   each observation, reducing unstable Mesa/SAPIEN native calls without changing
   RGB, qpos, action, or camera-layout model inputs.
