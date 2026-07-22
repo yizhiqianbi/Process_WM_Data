@@ -1,0 +1,123 @@
+左手 H130M-I03300523
+[圖片]
+type= pinhole
+imageWidth= 2560
+imageHeight= 1984
+fx= 971.2241342554
+fy= 970.9262643161
+cx= 1271.5856439582
+cy= 1009.7442903671
+k1= 0.7795499279
+k2= 0.2730858611
+p1= 0.0001300292
+p2= -0.0000844210
+k3= 0.0055125489
+k4= 0.8742988856
+k5= 0.4281420988
+k6= 0.0404470047
+
+PixelSize= 2.2500 um
+IdealLensFocalLength= 2.1800 mm
+RealLensFocalLength_x= 2.1853 [offset: 0.0053] mm (2.33525) pixel
+RealLensFocalLength_y= 2.1846 [offset: 0.0046] mm (2.03738) pixel
+
+RMS_MEAN= 0.0102
+RMS_Max= 0.0134
+RMS_Min= 0.0070
+COD_X= -8.4144
+COD_Y= 17.7443
+
+
+右手 H130M-I03300534
+[圖片]
+type= pinhole
+imageWidth= 2560
+imageHeight= 1984
+fx= 971.6640570041
+fy= 971.8518689521
+cx= 1274.6223967938
+cy= 988.0159761489
+k1= 0.7814000478
+k2= 0.2692024767
+p1= 0.0001401975
+p2= -0.0000979187
+k3= 0.0054402354
+k4= 0.8758675499
+k5= 0.4241401106
+k6= 0.0397720982
+
+PixelSize= 2.2500 um
+IdealLensFocalLength= 2.1800 mm
+RealLensFocalLength_x= 2.1862 [offset: 0.0062] mm (2.77517) pixel
+RealLensFocalLength_y= 2.1867 [offset: 0.0067] mm (2.96298) pixel
+
+RMS_MEAN= 0.0101
+RMS_Max= 0.0140
+RMS_Min= 0.0067
+COD_X= -5.3776
+COD_Y= -3.9840
+
+
+
+左眼 H130M-I03160518
+[圖片]
+
+type= pinhole
+imageWidth= 2560
+imageHeight= 1984
+fx= 973.9824479627
+fy= 974.1762712217
+cx= 1292.7367933669
+cy= 991.4534351327
+k1= 0.7565748021
+k2= 0.3488354687
+p1= 0.0001089934
+p2= -0.0001078989
+k3= 0.0089876578
+k4= 0.8527362413
+k5= 0.4965848315
+k6= 0.0578912589
+
+PixelSize= 2.2500 um
+IdealLensFocalLength= 2.1800 mm
+RealLensFocalLength_x= 2.1915 [offset: 0.0115] mm (5.09356) pixel
+RealLensFocalLength_y= 2.1919 [offset: 0.0119] mm (5.28738) pixel
+
+RMS_MEAN= 0.0093
+RMS_Max= 0.0112
+RMS_Min= 0.0069
+COD_X= 12.7368
+COD_Y= -0.5466
+
+
+
+
+
+右眼 H130M-I03160502
+[圖片]
+type= pinhole
+imageWidth= 2560
+imageHeight= 1984
+fx= 971.0757326399
+fy= 971.1221783214
+cx= 1271.0577776443
+cy= 994.6947026234
+k1= 0.7502349009
+k2= 0.3248093597
+p1= 0.0000012500
+p2= -0.0000210533
+k3= 0.0079293421
+k4= 0.8469055629
+k5= 0.4724447258
+k6= 0.0524623068
+
+PixelSize= 2.2500 um
+IdealLensFocalLength= 2.1800 mm
+RealLensFocalLength_x= 2.1849 [offset: 0.0049] mm (2.18684) pixel
+RealLensFocalLength_y= 2.1850 [offset: 0.0050] mm (2.23329) pixel
+
+RMS_MEAN= 0.0083
+RMS_Max= 0.0106
+RMS_Min= 0.0065
+COD_X= -8.9422
+COD_Y= 2.6947
